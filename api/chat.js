@@ -149,7 +149,7 @@ export default async function handler(req, res) {
         },
         body: JSON.stringify({
           model: CLAUDE_MODEL,
-          max_tokens: 4096,
+          max_tokens: 2048,
           system: SYSTEM_PROMPT,
           tools: TOOLS,
           messages: currentMessages,
