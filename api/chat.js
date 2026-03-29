@@ -180,9 +180,22 @@ export default async function handler(req, res) {
     // Phase 1: Tool-use loop (non-streaming) to resolve all BigQuery queries
     while (rounds < MAX_TOOL_ROUNDS) {
       rounds++;
-      var claudeData = await callClaude(currentMessages);
+      console.log("[LOOP] Round " + rounds + " starting, messages count: " + currentMessages.length);
 
-      if (claudeData.stop_reason === "end_turn") {
+      var claudeData;
+      try {
+        claudeData = await callClaude(currentMessages);
+      } catch (claudeErr) {
+        console.error("[LOOP] Claude call failed in round " + rounds + ":", claudeErr.message);
+        sseWrite(res, "text", { text: "Error al consultar el modelo: " + claudeErr.message });
+        sseWrite(res, "done", {});
+        res.end();
+        return;
+      }
+
+      console.log("[LOOP] Round " + rounds + " stop_reason: " + claudeData.stop_reason);
+
+      if (claudeData.stop_reason === "end_turn" || claudeData.stop_reason === "max_tokens") {
         // Final answer arrived (no streaming needed, tools already resolved)
         var textContent = claudeData.content
           .filter(function(block) { return block.type === "text"; })
