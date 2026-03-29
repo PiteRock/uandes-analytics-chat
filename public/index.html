@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>UAndes Analytics — 5minutos.io</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    
+    body {
+      font-family: 'DM Sans', sans-serif;
+      background: #0a0a14;
+      color: #e8e8e8;
+      height: 100vh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
+
+    /* Header */
+    .header {
+      padding: 16px 24px;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(255,255,255,0.02);
+      backdrop-filter: blur(20px);
+      flex-shrink: 0;
+    }
+
+    .header-left { display: flex; align-items: center; gap: 14px; }
+
+    .logo {
+      width: 42px; height: 42px; border-radius: 12px;
+      background: linear-gradient(135deg, #E8530E, #FF7A3D);
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 800; font-size: 15px; color: #fff;
+      letter-spacing: -0.5px;
+    }
+
+    .header-title { font-weight: 700; font-size: 16px; letter-spacing: -0.3px; }
+
+    .header-status {
+      font-size: 12px; color: rgba(255,255,255,0.4);
+      display: flex; align-items: center; gap: 6px; margin-top: 2px;
+    }
+
+    .status-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: #22c55e;
+      box-shadow: 0 0 8px rgba(34,197,94,0.5);
+    }
+
+    .powered {
+      font-size: 11px; color: rgba(255,255,255,0.25);
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    /* Messages */
+    .messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px 24px 8px;
+    }
+
+    .msg-row {
+      display: flex;
+      margin-bottom: 16px;
+      animation: fadeIn 0.3s ease;
+    }
+
+    .msg-row.user { justify-content: flex-end; }
+
+    .avatar {
+      width: 36px; height: 36px; border-radius: 50%;
+      background: linear-gradient(135deg, #E8530E, #FF7A3D);
+      display: flex; align-items: center; justify-content: center;
+      margin-right: 10px; flex-shrink: 0; margin-top: 4px;
+      font-weight: 700; font-size: 14px; color: #fff;
+    }
+
+    .bubble {
+      max-width: 78%;
+      padding: 14px 18px;
+      font-size: 14px;
+      line-height: 1.65;
+      word-break: break-word;
+    }
+
+    .bubble.assistant {
+      border-radius: 20px 20px 20px 4px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+    }
+
+    .bubble.user {
+      border-radius: 20px 20px 4px 20px;
+      background: linear-gradient(135deg, #1a1a2e, #16213e);
+    }
+
+    .bubble .time {
+      font-size: 11px; color: rgba(255,255,255,0.3);
+      margin-top: 6px;
+    }
+
+    .bubble strong, .bubble b { color: #FF7A3D; }
+
+    /* Markdown-style tables */
+    .bubble table {
+      border-collapse: collapse;
+      margin: 10px 0;
+      font-size: 13px;
+      width: 100%;
+    }
+    .bubble th, .bubble td {
+      padding: 6px 10px;
+      border: 1px solid rgba(255,255,255,0.1);
+      text-align: left;
+    }
+    .bubble th {
+      background: rgba(232,83,14,0.15);
+      color: #FF7A3D;
+      font-weight: 600;
+    }
+    .bubble code {
+      background: rgba(255,255,255,0.08);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+    }
+
+    /* Typing */
+    .typing { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+
+    .typing-dots {
+      padding: 14px 22px;
+      border-radius: 20px 20px 20px 4px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      display: flex; gap: 5px;
+    }
+
+    .typing-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #FF7A3D;
+      animation: pulse 1.4s ease-in-out infinite;
+    }
+    .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+    .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+
+    /* Quick Actions */
+    .quick-actions {
+      padding: 0 24px 12px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      animation: fadeIn 0.5s ease;
+    }
+
+    .quick-btn {
+      padding: 10px 16px;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.03);
+      color: #ccc;
+      font-size: 13px;
+      cursor: pointer;
+      transition: all 0.2s;
+      font-family: 'DM Sans', sans-serif;
+      display: flex; align-items: center; gap: 6px;
+    }
+
+    .quick-btn:hover {
+      background: rgba(232,83,14,0.15);
+      border-color: rgba(232,83,14,0.3);
+      color: #FF7A3D;
+    }
+
+    /* Input */
+    .input-area {
+      padding: 16px 24px 20px;
+      border-top: 1px solid rgba(255,255,255,0.06);
+      background: rgba(255,255,255,0.02);
+      flex-shrink: 0;
+    }
+
+    .input-wrap {
+      display: flex;
+      align-items: flex-end;
+      gap: 12px;
+      background: rgba(255,255,255,0.04);
+      border-radius: 16px;
+      border: 1px solid rgba(255,255,255,0.08);
+      padding: 4px 4px 4px 18px;
+      transition: border-color 0.2s;
+    }
+
+    .input-wrap:focus-within {
+      border-color: rgba(232,83,14,0.3);
+    }
+
+    .input-wrap textarea {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: #e8e8e8;
+      font-size: 14px;
+      font-family: 'DM Sans', sans-serif;
+      resize: none;
+      padding: 12px 0;
+      max-height: 120px;
+      line-height: 1.5;
+    }
+
+    .input-wrap textarea::placeholder { color: rgba(255,255,255,0.35); }
+
+    .send-btn {
+      width: 44px; height: 44px; border-radius: 12px;
+      border: none;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: all 0.2s;
+      flex-shrink: 0;
+    }
+
+    .send-btn.active {
+      background: linear-gradient(135deg, #E8530E, #FF7A3D);
+    }
+
+    .send-btn.inactive {
+      background: rgba(255,255,255,0.05);
+      cursor: default;
+    }
+
+    .footer-text {
+      text-align: center;
+      font-size: 11px;
+      color: rgba(255,255,255,0.15);
+      margin-top: 10px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes pulse { 0%, 100% { opacity: 0.3; transform: scale(0.8); } 50% { opacity: 1; transform: scale(1.1); } }
+
+    @media (max-width: 640px) {
+      .bubble { max-width: 90%; }
+      .header { padding: 12px 16px; }
+      .messages { padding: 16px; }
+      .input-area { padding: 12px 16px 16px; }
+      .quick-actions { padding: 0 16px 8px; }
+      .powered { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <!-- Header -->
+  <div class="header">
+    <div class="header-left">
+      <div class="logo">5m</div>
+      <div>
+        <div class="header-title">UAndes Analytics</div>
+        <div class="header-status">
+          <div class="status-dot"></div>
+          Conectado a BigQuery
+        </div>
+      </div>
+    </div>
+    <div class="powered">powered by 5minutos.io</div>
+  </div>
+
+  <!-- Messages -->
+  <div class="messages" id="messages">
+    <div class="msg-row">
+      <div class="avatar">5m</div>
+      <div class="bubble assistant">
+        Hola 👋 Soy tu asistente de analítica de campañas. Tengo acceso directo a los datos de Meta Ads y Google Ads de UAndes en BigQuery.<br><br>
+        Puedes preguntarme sobre rendimiento de campañas, CPL, keywords, creatividades, o usar los botones rápidos de abajo.<br><br>
+        ¿En qué te puedo ayudar?
+        <div class="time" style="text-align:left"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Quick Actions -->
+  <div class="quick-actions" id="quickActions">
+    <button class="quick-btn" onclick="send('Dame el resumen ejecutivo de ayer para Meta y Google Ads: gasto total, MQL, CPL, y las campañas con peor rendimiento')">📊 Resumen de ayer</button>
+    <button class="quick-btn" onclick="send('¿Cuáles campañas tienen MQL=0 en los últimos 7 días pero siguen gastando? Ordénalas por gasto descendente')">🔴 Gasto sin MQL</button>
+    <button class="quick-btn" onclick="send('Muéstrame la evolución del CPL diario de los últimos 14 días para Meta y Google por separado')">📈 Tendencia CPL</button>
+    <button class="quick-btn" onclick="send('¿Cuáles son los 20 search terms de Google que más gastan sin generar conversiones en la última semana?')">🔍 Search terms</button>
+    <button class="quick-btn" onclick="send('¿Cuáles son las 10 campañas con mayor inversión en los últimos 7 días y cuál es su CPL?')">💰 Top inversión</button>
+    <button class="quick-btn" onclick="send('¿Cuáles campañas tienen el mejor CPL con al menos 5 MQL en los últimos 7 días? Recomienda cuáles escalar')">🎯 Mejores para escalar</button>
+  </div>
+
+  <!-- Input -->
+  <div class="input-area">
+    <div class="input-wrap">
+      <textarea id="input" placeholder="Pregunta sobre tus campañas..." rows="1"
+        oninput="this.style.height='auto'; this.style.height=Math.min(this.scrollHeight,120)+'px'; updateBtn();"
+        onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send();}"></textarea>
+      <button class="send-btn inactive" id="sendBtn" onclick="send()">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="color:rgba(255,255,255,0.2)" id="sendIcon">
+          <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+        </svg>
+      </button>
+    </div>
+    <div class="footer-text">Los datos provienen de BigQuery en tiempo real · 5minutos.io × UAndes Online</div>
+  </div>
+
+  <script>
+    const API_URL = "/api/chat";
+    let conversationHistory = [];
+    let isLoading = false;
+
+    function updateBtn() {
+      const btn = document.getElementById("sendBtn");
+      const icon = document.getElementById("sendIcon");
+      const val = document.getElementById("input").value.trim();
+      if (val && !isLoading) {
+        btn.className = "send-btn active";
+        icon.style.color = "#fff";
+      } else {
+        btn.className = "send-btn inactive";
+        icon.style.color = "rgba(255,255,255,0.2)";
+      }
+    }
+
+    function formatTime() {
+      return new Date().toLocaleTimeString("es-CL", { hour: "2-digit", minute: "2-digit" });
+    }
+
+    function renderMarkdown(text) {
+      // Bold
+      text = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+      // Inline code
+      text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+      // Simple table detection
+      if (text.includes('|')) {
+        const lines = text.split('\n');
+        let inTable = false;
+        let tableHtml = '';
+        let result = [];
+        
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (line.startsWith('|') && line.endsWith('|')) {
+            if (!inTable) {
+              inTable = true;
+              tableHtml = '<table>';
+            }
+            // Skip separator rows
+            if (line.replace(/[\|\-\s:]/g, '') === '') continue;
+            
+            const cells = line.split('|').filter(c => c.trim() !== '');
+            const isHeader = i === 0 || (i > 0 && lines[i-1] && !lines[i-1].trim().startsWith('|'));
+            const tag = !tableHtml.includes('<tr>') ? 'th' : 'td';
+            tableHtml += '<tr>' + cells.map(c => `<${tag}>${c.trim()}</${tag}>`).join('') + '</tr>';
+          } else {
+            if (inTable) {
+              tableHtml += '</table>';
+              result.push(tableHtml);
+              tableHtml = '';
+              inTable = false;
+            }
+            result.push(line);
+          }
+        }
+        if (inTable) { tableHtml += '</table>'; result.push(tableHtml); }
+        text = result.join('\n');
+      }
+      // Newlines
+      text = text.replace(/\n/g, '<br>');
+      return text;
+    }
+
+    function addMessage(role, content) {
+      const container = document.getElementById("messages");
+      const div = document.createElement("div");
+      div.className = `msg-row ${role}`;
+
+      if (role === "assistant") {
+        div.innerHTML = `
+          <div class="avatar">5m</div>
+          <div class="bubble assistant">
+            ${renderMarkdown(content)}
+            <div class="time" style="text-align:left">${formatTime()}</div>
+          </div>`;
+      } else {
+        div.innerHTML = `
+          <div class="bubble user">
+            ${content}
+            <div class="time" style="text-align:right">${formatTime()}</div>
+          </div>`;
+      }
+
+      container.appendChild(div);
+      container.scrollTop = container.scrollHeight;
+    }
+
+    function showTyping() {
+      const container = document.getElementById("messages");
+      const div = document.createElement("div");
+      div.className = "typing";
+      div.id = "typingIndicator";
+      div.innerHTML = `
+        <div class="avatar">5m</div>
+        <div class="typing-dots">
+          <div class="typing-dot"></div>
+          <div class="typing-dot"></div>
+          <div class="typing-dot"></div>
+        </div>`;
+      container.appendChild(div);
+      container.scrollTop = container.scrollHeight;
+    }
+
+    function hideTyping() {
+      const el = document.getElementById("typingIndicator");
+      if (el) el.remove();
+    }
+
+    async function send(text) {
+      const input = document.getElementById("input");
+      const message = text || input.value.trim();
+      if (!message || isLoading) return;
+
+      input.value = "";
+      input.style.height = "auto";
+      isLoading = true;
+      updateBtn();
+
+      // Hide quick actions after first message
+      const qa = document.getElementById("quickActions");
+      if (qa) qa.style.display = "none";
+
+      addMessage("user", message);
+      conversationHistory.push({ role: "user", content: message });
+
+      showTyping();
+
+      try {
+        const res = await fetch(API_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ messages: conversationHistory }),
+        });
+
+        const data = await res.json();
+        hideTyping();
+
+        if (data.error) {
+          addMessage("assistant", `⚠️ Error: ${data.error}`);
+        } else {
+          const reply = data.response || "No pude obtener una respuesta.";
+          addMessage("assistant", reply);
+          conversationHistory.push({ role: "assistant", content: reply });
+        }
+      } catch (err) {
+        hideTyping();
+        addMessage("assistant", `⚠️ Error de conexión: ${err.message}`);
+      } finally {
+        isLoading = false;
+        updateBtn();
+        input.focus();
+      }
+    }
+
+    // Set initial time
+    document.querySelector(".time").textContent = formatTime();
+  </script>
+</body>
+</html>
