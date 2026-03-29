@@ -1,0 +1,11 @@
+{
+  "functions": {
+    "api/chat.js": {
+      "runtime": "@vercel/edge",
+      "maxDuration": 60
+    }
+  },
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}
