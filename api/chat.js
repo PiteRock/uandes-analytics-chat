@@ -1,5 +1,5 @@
 export const config = {
-  runtime: "edge",
+  maxDuration: 60,
 };
 
 const SYSTEM_PROMPT = `Eres el asistente de analítica de marketing de 5minutos.io para UAndes Online.
