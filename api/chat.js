@@ -1,13 +1,11 @@
 import jwt from "jsonwebtoken";
 
-// ─── CONFIG ───────────────────────────────────────────────────────────────────
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const GCP_PROJECT = "perfomance-490910";
 const BQ_DATASET = "uandes_marketing";
 const CLAUDE_MODEL = "claude-sonnet-4-20250514";
-const MAX_TOOL_ROUNDS = 3;
+const MAX_TOOL_ROUNDS = 5;
 
-// ─── BIGQUERY AUTH ────────────────────────────────────────────────────────────
 let cachedToken = null;
 let tokenExpiry = 0;
 
@@ -52,7 +50,6 @@ async function getAccessToken(sa) {
   return cachedToken;
 }
 
-// ─── BIGQUERY QUERY ───────────────────────────────────────────────────────────
 async function runBigQueryQuery(sql, accessToken) {
   const url = "https://bigquery.googleapis.com/bigquery/v2/projects/" + GCP_PROJECT + "/queries";
   const resp = await fetch(url, {
@@ -93,19 +90,18 @@ async function runBigQueryQuery(sql, accessToken) {
   return { totalRows: result.totalRows, columns: columns, rows: rows };
 }
 
-// ─── SYSTEM PROMPT v2 — LOGICA CPL/CAC ────────────────────────────────────────
-var SYSTEM_PROMPT = "Eres un analista de marketing digital experto en campanas de educacion online. Trabajas para UAndes Online y tienes acceso directo a su data warehouse en BigQuery.\n\n## Dataset: " + GCP_PROJECT + "." + BQ_DATASET + "\n\n### Tablas disponibles:\n\n1. **ads_hourly_unified** - Gasto por hora x campana (2026)\n   Columnas: date (DATE), hour (INT), platform (STRING: 'meta'|'google'), campaign_name, campaign_id, cost_with_iva (FLOAT, pesos CLP con IVA), impressions, clicks, reach, negocio, diplomado\n\n2. **FBADS_AD** - Meta Ads nivel anuncio (desde 9 mar 2026)\n   Columnas: DATE (DATE), AD_ID, AD_NAME, AD_GROUP_ID, AD_GROUP_NAME, CAMPAIGN_NAME, CREATIVE_BODY, CREATIVE_IMAGE_URL, COST (FLOAT, sin IVA), CLICKS, IMPRESSIONS, REACH\n\n3. **GOOGLEADS_AD** - Google Ads nivel anuncio\n   Columnas: DATE (DATE), AD_ID, AD_TYPE, FINAL_URL, COST (FLOAT, sin IVA), CLICKS, IMPRESSIONS, CAMPAIGN_NAME\n\n4. **GOOGLEADS_KEYWORD** - Keywords (4,992 filas)\n   Columnas: DATE, KEYWORD, QUALITY_SCORE, MATCH_TYPE, COST (sin IVA), CLICKS, IMPRESSIONS, CAMPAIGN_NAME\n\n5. **GOOGLEADS_SEARCH_QUERY** - Terminos buscados (25,398 filas)\n   Columnas: DATE, SEARCH_TERM, KEYWORD, COST (sin IVA), CLICKS, CONVERSIONS, CAMPAIGN_NAME\n\n6. **stg_hubspot_contacts_attributed** - Leads con atribucion\n   Columnas: create_date (TIMESTAMP), detected_platform, extracted_meta_adset_id, extracted_google_campaign_id, conversion_mql (BOOLEAN)\n\n7. **vw_ads_all_time** - Vista combinada 2025+2026 (~208K filas)\n\n8. **dim_diplomado_mapping** - Mapeo campana a diplomado a negocio (212 filas)\n\n---\n\n## REGLAS DE NEGOCIO CRITICAS\n\n### Gasto e IVA\n- FBADS_AD y GOOGLEADS_*: COST viene SIN IVA. Multiplicar COST x 1.19 para Chile.\n- ads_hourly_unified: ya tiene cost_with_iva (incluye IVA).\n\n### CPL - METRICA PRINCIPAL\n- CPL = Gasto con IVA / cantidad de MQL (donde conversion_mql = true en stg_hubspot_contacts_attributed).\n- NUNCA dividas por leads totales, solo por MQLs.\n- Para calcular CPL, SIEMPRE cruzar gasto de ads con MQLs de HubSpot.\n- El CPL es la metrica primaria de salud de campanas, NO el CPC.\n- Cuando te pregunten como van las campanas, que esta critico, o cualquier pregunta general: SIEMPRE responde en terminos de CPL, no de CPC.\n\n### Sistema de Evaluacion de CPL (Sistema de Reporteo Diario v6)\nCuando analices rendimiento o te pregunten como van las campanas, que esta critico, o cualquier pregunta no especifica, usa este sistema:\n\nScore ponderado por ventana temporal:\n- Ayer: 30%\n- Ultimos 3 dias: 25%\n- Ultima semana (7 dias): 20%\n- Ultimos 7 dias (rolling): 25%\n\nEstados basados en desviacion vs CPL historico de la linea de negocio:\n- CRITICO (rojo): CPL actual > 200% del CPL historico del diplomado/linea de negocio\n- ALERTA (amarillo): CPL actual entre 50% y 200% sobre el historico\n- ESTABLE (verde): CPL actual entre -20% y +50% del historico\n- BIEN (azul): CPL actual < -20% del historico (mejor que el promedio)\n\nBaseline historica:\n- Meta: usar datos de noviembre 2025 a enero 2026 como baseline (de vw_ads_all_time)\n- Google: usar datos de enero 2026 como baseline\n- Si no hay datos suficientes para baseline, calcular promedio de los ultimos 30 dias disponibles\n\nREGLA CRITICA - Gasto sin leads:\n- Cuando una campana/diplomado tiene gasto pero CERO MQLs, esa es la PEOR situacion posible.\n- Marcar siempre como CRITICO con nota especial: Gasto sin conversion de MQL\n- Priorizar estas campanas en el analisis por encima de CPL alto\n\n### CAC - Costo de Adquisicion de Cliente\n- CAC = Gasto total con IVA / Deals cerrados ganados\n- El CAC NO es dinamico diario como el CPL. Se evalua por ventana de cierre segun linea de negocio.\n- Cada diplomado tiene un tiempo promedio de cierre diferente. Usar ventanas de 30, 60 o 90 dias segun el volumen de deals cerrados.\n- Si no hay datos de deals cerrados en las tablas disponibles, informar que el CAC requiere datos del pipeline de ventas que actualmente no estan en BigQuery, y ofrecer analizar CPL como proxy.\n\n### Analisis por Linea de Negocio\n- Usar dim_diplomado_mapping para agrupar campanas por diplomado y negocio.\n- El CPL historico se calcula POR DIPLOMADO, no de forma global.\n- Cada linea de negocio tiene su propio benchmark de CPL.\n\n---\n\n## FORMATO DE RESPUESTA\n\n### Cuando la pregunta es general o no especifica:\nResponder SIEMPRE con analisis basado en CPL (y CAC si hay datos), NO en CPC. Estructura:\n\n1. Resumen ejecutivo: Estado general con gasto total, MQLs, CPL promedio\n2. Campanas/diplomados criticos: CPL > 200% del historico O gasto sin MQL\n3. Campanas en alerta: CPL entre 50%-200% sobre historico\n4. Campanas con buen rendimiento: Para escalar\n5. Recomendaciones: Basadas en los datos, no genericas\n\n### Reglas de formato:\n- Responde SIEMPRE en espanol\n- Formatea montos en CLP con separador de miles (punto) y sin decimales\n- Usa tablas markdown para comparaciones\n- Usa emojis de estado en headers y tablas\n- Si no estas seguro de algo, dilo. No inventes datos.\n- Si una pregunta no puede responderse con los datos disponibles, explica por que.\n- Siempre califica tablas: `" + GCP_PROJECT + "." + BQ_DATASET + ".nombre_tabla`\n- Limita resultados con LIMIT cuando sea apropiado.";
+var SYSTEM_PROMPT = "Eres un analista de marketing digital experto en campanas de educacion online. Trabajas para UAndes Online y tienes acceso directo a BigQuery.\n\nDataset: " + GCP_PROJECT + "." + BQ_DATASET + "\n\nTablas:\n1. ads_hourly_unified - Gasto por hora x campana (2026). Cols: date, hour, platform ('meta'|'google'), campaign_name, campaign_id, cost_with_iva (CLP con IVA), impressions, clicks, reach, negocio, diplomado\n2. FBADS_AD - Meta Ads nivel anuncio (desde 9 mar 2026). Cols: DATE, AD_ID, AD_NAME, AD_GROUP_ID, AD_GROUP_NAME, CAMPAIGN_NAME, CREATIVE_BODY, CREATIVE_IMAGE_URL, COST (sin IVA), CLICKS, IMPRESSIONS, REACH\n3. GOOGLEADS_AD - Google Ads nivel anuncio. Cols: DATE, AD_ID, AD_TYPE, FINAL_URL, COST (sin IVA), CLICKS, IMPRESSIONS, CAMPAIGN_NAME\n4. GOOGLEADS_KEYWORD - Keywords. Cols: DATE, KEYWORD, QUALITY_SCORE, MATCH_TYPE, COST (sin IVA), CLICKS, IMPRESSIONS, CAMPAIGN_NAME\n5. GOOGLEADS_SEARCH_QUERY - Search terms. Cols: DATE, SEARCH_TERM, KEYWORD, COST (sin IVA), CLICKS, CONVERSIONS, CAMPAIGN_NAME\n6. stg_hubspot_contacts_attributed - Leads HubSpot. Cols: create_date (TIMESTAMP), detected_platform, extracted_meta_adset_id, extracted_google_campaign_id, conversion_mql (BOOLEAN)\n7. vw_ads_all_time - Vista 2025+2026 (~208K filas)\n8. dim_diplomado_mapping - Mapeo campana a diplomado a negocio (212 filas)\n\nREGLAS CRITICAS:\n- FBADS_AD/GOOGLEADS_*: COST sin IVA, multiplicar x 1.19\n- ads_hourly_unified: cost_with_iva ya incluye IVA\n- CPL = Gasto con IVA / MQLs (conversion_mql=true). NUNCA dividas por leads totales.\n- CPL es la METRICA PRINCIPAL, no CPC. Para preguntas generales, analiza CPL.\n- Gasto con CERO MQLs = situacion CRITICA, priorizar sobre CPL alto.\n- Usa dim_diplomado_mapping para agrupar por diplomado/negocio.\n- CPL historico se calcula POR DIPLOMADO.\n- Estados: CRITICO (CPL>200% historico), ALERTA (50-200%), ESTABLE (-20% a +50%), BIEN (<-20%)\n- Califica tablas: `" + GCP_PROJECT + "." + BQ_DATASET + ".tabla`\n- Usa LIMIT. Responde en espanol. Montos CLP con punto separador miles.\n- No inventes datos. Si no puedes responder, explica por que.";
 
 var TOOLS = [
   {
     name: "run_bigquery_query",
-    description: "Ejecuta una query SQL en Google BigQuery contra el dataset de marketing de UAndes. Usa esta herramienta para consultar datos de campanas, gastos, leads, keywords y metricas de performance. Siempre usa nombres de tabla completamente calificados: perfomance-490910.uandes_marketing.nombre_tabla",
+    description: "Ejecuta SQL en BigQuery. Usa nombres calificados: `perfomance-490910.uandes_marketing.tabla`",
     input_schema: {
       type: "object",
       properties: {
         sql: {
           type: "string",
-          description: "Query SQL compatible con BigQuery Standard SQL. Usa backticks para proyecto.dataset.tabla: `perfomance-490910.uandes_marketing.tabla`",
+          description: "Query SQL BigQuery Standard. Usa backticks para tabla: `perfomance-490910.uandes_marketing.tabla`",
         },
       },
       required: ["sql"],
@@ -113,36 +109,6 @@ var TOOLS = [
   },
 ];
 
-// ─── NON-STREAMING CLAUDE CALL (for tool-use rounds) ─────────────────────────
-async function callClaude(messages) {
-  var resp = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model: CLAUDE_MODEL,
-      max_tokens: 4096,
-      system: SYSTEM_PROMPT,
-      tools: TOOLS,
-      messages: messages,
-    }),
-  });
-  if (!resp.ok) {
-    var errText = await resp.text();
-    throw new Error("Claude API error (" + resp.status + "): " + errText.substring(0, 300));
-  }
-  return resp.json();
-}
-
-// ─── SSE HELPER ───────────────────────────────────────────────────────────────
-function sseWrite(res, event, data) {
-  res.write("event: " + event + "\ndata: " + JSON.stringify(data) + "\n\n");
-}
-
-// ─── MAIN HANDLER ─────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -167,53 +133,50 @@ export default async function handler(req, res) {
 
     var sa = parseServiceAccount();
     var accessToken = await getAccessToken(sa);
-
-    // Set up SSE
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
-    res.setHeader("Connection", "keep-alive");
-    res.flushHeaders();
-
     var currentMessages = messages.slice();
     var rounds = 0;
 
-    // Phase 1: Tool-use loop (non-streaming) to resolve all BigQuery queries
     while (rounds < MAX_TOOL_ROUNDS) {
       rounds++;
-      console.log("[LOOP] Round " + rounds + " starting, messages count: " + currentMessages.length);
+      console.log("[LOOP] Round " + rounds + " starting");
 
-      var claudeData;
-      try {
-        claudeData = await callClaude(currentMessages);
-      } catch (claudeErr) {
-        console.error("[LOOP] Claude call failed in round " + rounds + ":", claudeErr.message);
-        sseWrite(res, "text", { text: "Error al consultar el modelo: " + claudeErr.message });
-        sseWrite(res, "done", {});
-        res.end();
-        return;
+      var claudeResp = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": ANTHROPIC_API_KEY,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: CLAUDE_MODEL,
+          max_tokens: 4096,
+          system: SYSTEM_PROMPT,
+          tools: TOOLS,
+          messages: currentMessages,
+        }),
+      });
+
+      if (!claudeResp.ok) {
+        var errText = await claudeResp.text();
+        console.error("[CLAUDE] Error " + claudeResp.status + ":", errText.substring(0, 300));
+        return res.status(502).json({
+          error: "Error al comunicarse con Claude (" + claudeResp.status + ")",
+          detail: errText.substring(0, 200),
+        });
       }
 
+      var claudeData = await claudeResp.json();
       console.log("[LOOP] Round " + rounds + " stop_reason: " + claudeData.stop_reason);
 
       if (claudeData.stop_reason === "end_turn" || claudeData.stop_reason === "max_tokens") {
-        // Final answer arrived (no streaming needed, tools already resolved)
         var textContent = claudeData.content
           .filter(function(block) { return block.type === "text"; })
           .map(function(block) { return block.text; })
           .join("\n");
-        // Simulate streaming by chunking the text
-        var chunkSize = 12;
-        for (var ci = 0; ci < textContent.length; ci += chunkSize) {
-          sseWrite(res, "text", { text: textContent.slice(ci, ci + chunkSize) });
-        }
-        sseWrite(res, "done", {});
-        res.end();
-        return;
+        return res.status(200).json({ response: textContent });
       }
 
       if (claudeData.stop_reason === "tool_use") {
-        sseWrite(res, "status", { message: "Consultando BigQuery..." });
-
         currentMessages.push({
           role: "assistant",
           content: claudeData.content,
@@ -239,12 +202,10 @@ export default async function handler(req, res) {
               console.log("[BQ] Round " + rounds + ":", sql.substring(0, 200));
               var queryResult = await runBigQueryQuery(sql, accessToken);
               var resultStr = JSON.stringify(queryResult);
-              // Truncate if too large to avoid slow Claude responses
               if (resultStr.length > 15000) {
-                console.log("[BQ] Result truncated from " + resultStr.length + " to 15000 chars");
                 queryResult.rows = queryResult.rows.slice(0, 50);
                 queryResult.truncated = true;
-                queryResult.note = "Resultados truncados a 50 filas. Usa LIMIT en tu query para ser mas especifico.";
+                queryResult.note = "Truncado a 50 filas. Usa LIMIT o filtros mas especificos.";
                 resultStr = JSON.stringify(queryResult);
               }
               toolResults.push({
@@ -252,7 +213,6 @@ export default async function handler(req, res) {
                 tool_use_id: block.id,
                 content: resultStr,
               });
-              sseWrite(res, "status", { message: "Datos obtenidos, analizando..." });
             } catch (bqError) {
               console.error("[BQ] Failed:", bqError.message);
               toolResults.push({
@@ -260,7 +220,7 @@ export default async function handler(req, res) {
                 tool_use_id: block.id,
                 content: JSON.stringify({
                   error: bqError.message,
-                  hint: "Revisa la sintaxis SQL, nombres de tabla y columnas.",
+                  hint: "Revisa sintaxis SQL y nombres de tabla/columnas.",
                 }),
                 is_error: true,
               });
@@ -279,28 +239,21 @@ export default async function handler(req, res) {
         continue;
       }
 
-      // Unexpected stop_reason — send whatever we got
+      // Unexpected stop_reason
       var fallbackText = claudeData.content
         ? claudeData.content.filter(function(b) { return b.type === "text"; }).map(function(b) { return b.text; }).join("\n")
         : "No se pudo generar una respuesta.";
-      sseWrite(res, "text", { text: fallbackText });
-      sseWrite(res, "done", {});
-      res.end();
-      return;
+      return res.status(200).json({ response: fallbackText });
     }
 
-    // Exhausted tool rounds
-    sseWrite(res, "text", { text: "Se alcanzo el limite de consultas. Reformula tu pregunta de forma mas especifica." });
-    sseWrite(res, "done", {});
-    res.end();
-
+    return res.status(200).json({
+      response: "Se alcanzo el limite de consultas internas. Reformula tu pregunta.",
+    });
   } catch (err) {
     console.error("[FATAL]", err);
-    if (res.headersSent) {
-      sseWrite(res, "error", { message: err.message });
-      res.end();
-    } else {
-      res.status(500).json({ error: "Error interno del servidor", detail: err.message });
-    }
+    return res.status(500).json({
+      error: "Error interno del servidor",
+      detail: err.message,
+    });
   }
 }

@@ -802,11 +802,22 @@
           }
 
         } else {
-          // ─── JSON MODE (fallback) ───────────────────────
+          // ─── JSON MODE with typewriter effect ─────────────
           removeThinking();
           var data = await resp.json();
           var assistantMsg = createAssistantMessage();
           var fullText = data.response || "Sin respuesta.";
+
+          // Typewriter: render progressively
+          var rendered = "";
+          var chunkSize = 8;
+          for (var ti = 0; ti < fullText.length; ti += chunkSize) {
+            rendered = fullText.slice(0, ti + chunkSize);
+            assistantMsg.content.innerHTML = marked.parse(rendered);
+            scrollToBottom();
+            await new Promise(function(r) { setTimeout(r, 10); });
+          }
+          // Final render to ensure complete
           assistantMsg.content.innerHTML = marked.parse(fullText);
           addFooter(assistantMsg.container, fullText);
           conversationHistory.push({ role: "assistant", content: fullText });
