@@ -5,7 +5,7 @@ const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const GCP_PROJECT = "perfomance-490910";
 const BQ_DATASET = "uandes_marketing";
 const CLAUDE_MODEL = "claude-sonnet-4-20250514";
-const MAX_TOOL_ROUNDS = 5;
+const MAX_TOOL_ROUNDS = 3;
 
 // ─── BIGQUERY AUTH ────────────────────────────────────────────────────────────
 let cachedToken = null;
@@ -65,7 +65,7 @@ async function runBigQueryQuery(sql, accessToken) {
       query: sql,
       useLegacySql: false,
       timeoutMs: 30000,
-      maxResults: 500,
+      maxResults: 100,
     }),
   });
   if (!resp.ok) {
@@ -238,10 +238,19 @@ export default async function handler(req, res) {
             try {
               console.log("[BQ] Round " + rounds + ":", sql.substring(0, 200));
               var queryResult = await runBigQueryQuery(sql, accessToken);
+              var resultStr = JSON.stringify(queryResult);
+              // Truncate if too large to avoid slow Claude responses
+              if (resultStr.length > 15000) {
+                console.log("[BQ] Result truncated from " + resultStr.length + " to 15000 chars");
+                queryResult.rows = queryResult.rows.slice(0, 50);
+                queryResult.truncated = true;
+                queryResult.note = "Resultados truncados a 50 filas. Usa LIMIT en tu query para ser mas especifico.";
+                resultStr = JSON.stringify(queryResult);
+              }
               toolResults.push({
                 type: "tool_result",
                 tool_use_id: block.id,
-                content: JSON.stringify(queryResult),
+                content: resultStr,
               });
               sseWrite(res, "status", { message: "Datos obtenidos, analizando..." });
             } catch (bqError) {
