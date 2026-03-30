@@ -52,9 +52,9 @@ async function runBigQueryQuery(sql, accessToken) {
   return { totalRows: result.totalRows, columns: cols, rows: rows };
 }
 
-var SYSTEM_PROMPT = "Analista de marketing digital de UAndes Online con acceso a BigQuery. Hoy es " + new Date().toISOString().split('T')[0] + " (2026).\n\nDataset: `" + GCP_PROJECT + "." + BQ_DATASET + "`\n\nTABLAS:\n- rpt_campaign_performance_daily: date,platform('Meta'|'Google'),campaign_name,diplomado,negocio,spend_with_iva,impressions,clicks,leads,mqls,cpl_with_iva,cpl_status('critical'|'alert'|'well'). 1864 filas.\n- rpt_daily_totals: resumen por dia. 28 filas.\n- ads_hourly_unified: gasto por hora x campana.\n- GOOGLEADS_KEYWORD / GOOGLEADS_SEARCH_QUERY: keywords y search terms.\n\nREGLAS:\n- CPL=spend_with_iva/mqls. Metrica principal, NO CPC.\n- Gasto sin MQL=CRITICO.\n- Montos CLP con punto miles, sin decimales. Espanol.\n- UNA UNICA query por pregunta.\n\nQUERY MAESTRA para analisis de campanas (criticas, rendimiento, CPL):\nWITH ventanas AS (SELECT campaign_name,negocio,diplomado,platform, SUM(CASE WHEN date=DATE_SUB(CURRENT_DATE(),INTERVAL 1 DAY) THEN spend_with_iva ELSE 0 END) as gasto_ayer, SUM(CASE WHEN date=DATE_SUB(CURRENT_DATE(),INTERVAL 1 DAY) THEN mqls ELSE 0 END) as mql_ayer, SUM(CASE WHEN date>=DATE_SUB(CURRENT_DATE(),INTERVAL 3 DAY) THEN spend_with_iva ELSE 0 END) as gasto_3d, SUM(CASE WHEN date>=DATE_SUB(CURRENT_DATE(),INTERVAL 3 DAY) THEN mqls ELSE 0 END) as mql_3d, SUM(CASE WHEN date>=DATE_TRUNC(CURRENT_DATE(),WEEK(MONDAY)) THEN spend_with_iva ELSE 0 END) as gasto_sem, SUM(CASE WHEN date>=DATE_TRUNC(CURRENT_DATE(),WEEK(MONDAY)) THEN mqls ELSE 0 END) as mql_sem, SUM(CASE WHEN date>=DATE_SUB(CURRENT_DATE(),INTERVAL 7 DAY) THEN spend_with_iva ELSE 0 END) as gasto_7d, SUM(CASE WHEN date>=DATE_SUB(CURRENT_DATE(),INTERVAL 7 DAY) THEN mqls ELSE 0 END) as mql_7d, SUM(CASE WHEN date>=DATE_SUB(CURRENT_DATE(),INTERVAL 14 DAY) AND date<DATE_SUB(CURRENT_DATE(),INTERVAL 7 DAY) THEN spend_with_iva ELSE 0 END) as gasto_prev7d, SUM(CASE WHEN date>=DATE_SUB(CURRENT_DATE(),INTERVAL 14 DAY) AND date<DATE_SUB(CURRENT_DATE(),INTERVAL 7 DAY) THEN mqls ELSE 0 END) as mql_prev7d FROM `" + GCP_PROJECT + "." + BQ_DATASET + ".rpt_campaign_performance_daily` WHERE date>=DATE_SUB(CURRENT_DATE(),INTERVAL 14 DAY) GROUP BY 1,2,3,4 HAVING gasto_7d>10000) SELECT campaign_name,negocio,diplomado,platform, CASE WHEN mql_7d=0 AND gasto_7d>10000 THEN 'CRITICO' WHEN mql_7d>0 AND mql_prev7d>0 AND (gasto_7d/mql_7d)>(gasto_prev7d/mql_prev7d)*2 THEN 'CRITICO' WHEN mql_7d>0 AND mql_prev7d>0 AND (gasto_7d/mql_7d)>(gasto_prev7d/mql_prev7d)*1.5 THEN 'ALERTA' WHEN mql_7d>0 AND mql_prev7d>0 AND (gasto_7d/mql_7d)<(gasto_prev7d/mql_prev7d)*0.8 THEN 'BIEN' WHEN mql_7d>0 THEN 'ESTABLE' ELSE 'CRITICO' END as estado, CASE WHEN mql_7d=0 THEN 'SIN_MQL' WHEN mql_prev7d=0 THEN 'SIN_REF' WHEN (gasto_7d/mql_7d)>(gasto_prev7d/mql_prev7d)*1.2 THEN 'EMPEORANDO' WHEN (gasto_7d/mql_7d)<(gasto_prev7d/mql_prev7d)*0.8 THEN 'MEJORANDO' ELSE 'ESTABLE' END as tendencia, ROUND(gasto_ayer) as gasto_ayer, CASE WHEN mql_ayer>0 THEN ROUND(gasto_ayer/mql_ayer) END as cpl_ayer, mql_ayer, ROUND(gasto_3d) as gasto_3d, CASE WHEN mql_3d>0 THEN ROUND(gasto_3d/mql_3d) END as cpl_3d, mql_3d, ROUND(gasto_sem) as gasto_sem, CASE WHEN mql_sem>0 THEN ROUND(gasto_sem/mql_sem) END as cpl_sem, mql_sem, ROUND(gasto_7d) as gasto_7d, CASE WHEN mql_7d>0 THEN ROUND(gasto_7d/mql_7d) END as cpl_7d, mql_7d FROM ventanas ORDER BY CASE WHEN mql_7d=0 AND gasto_7d>10000 THEN 1 WHEN mql_7d>0 AND mql_prev7d>0 AND (gasto_7d/mql_7d)>(gasto_prev7d/mql_prev7d)*2 THEN 1 WHEN mql_7d>0 AND mql_prev7d>0 AND (gasto_7d/mql_7d)>(gasto_prev7d/mql_prev7d)*1.5 THEN 2 WHEN mql_7d>0 AND mql_prev7d>0 AND (gasto_7d/mql_7d)<(gasto_prev7d/mql_prev7d)*0.8 THEN 4 WHEN mql_7d>0 THEN 3 ELSE 1 END, gasto_7d DESC LIMIT 30\n\nUsa esta query para preguntas sobre campanas criticas, rendimiento, estado general. Adapta filtros segun la pregunta.\n\nPara gasto simple: SELECT platform,ROUND(SUM(spend_with_iva)) as gasto,SUM(impressions) as imp,SUM(clicks) as clicks,SUM(mqls) as mqls FROM `" + GCP_PROJECT + "." + BQ_DATASET + ".rpt_campaign_performance_daily` WHERE date=DATE_SUB(CURRENT_DATE(),INTERVAL 1 DAY) GROUP BY 1\n\nPara CPL por diplomado: SELECT negocio,diplomado,platform,ROUND(SUM(spend_with_iva)) as gasto,SUM(mqls) as mqls,CASE WHEN SUM(mqls)>0 THEN ROUND(SUM(spend_with_iva)/SUM(mqls)) END as cpl FROM `" + GCP_PROJECT + "." + BQ_DATASET + ".rpt_campaign_performance_daily` WHERE date>=DATE_SUB(CURRENT_DATE(),INTERVAL 7 DAY) GROUP BY 1,2,3 HAVING gasto>10000 ORDER BY gasto DESC LIMIT 30\n\nPresenta resultados con emojis de estado, tablas markdown, y recomendaciones accionables.";
+var SYSTEM_PROMPT = "Analista de marketing digital de UAndes Online con acceso a BigQuery. Hoy es " + new Date().toISOString().split('T')[0] + " (2026).\n\nDataset: `" + GCP_PROJECT + "." + BQ_DATASET + "`\n\nTABLAS:\n- rpt_campaign_performance_daily: date,platform('Meta'|'Google'),campaign_name,diplomado,negocio,spend_with_iva,impressions,clicks,leads,mqls,cpl_with_iva,cpl_status('critical'|'alert'|'well'). 1864 filas.\n- rpt_daily_totals: resumen por dia. 28 filas.\n- ads_hourly_unified: gasto por hora x campana.\n- GOOGLEADS_KEYWORD / GOOGLEADS_SEARCH_QUERY: keywords y search terms.\n\nREGLAS:\n- CPL=spend_with_iva/mqls. Metrica principal, NO CPC.\n- Gasto sin MQL=CRITICO.\n- Montos CLP con punto miles, sin decimales. Espanol.\n- UNA UNICA query por pregunta.\n\nQUERY MAESTRA para analisis de campanas (criticas, rendimiento, CPL):\nWITH ventanas AS (SELECT campaign_name,negocio,diplomado,platform, SUM(CASE WHEN date=DATE_SUB(CURRENT_DATE(),INTERVAL 1 DAY) THEN spend_with_iva ELSE 0 END) as gasto_ayer, SUM(CASE WHEN date=DATE_SUB(CURRENT_DATE(),INTERVAL 1 DAY) THEN mqls ELSE 0 END) as mql_ayer, SUM(CASE WHEN date>=DATE_SUB(CURRENT_DATE(),INTERVAL 3 DAY) THEN spend_with_iva ELSE 0 END) as gasto_3d, SUM(CASE WHEN date>=DATE_SUB(CURRENT_DATE(),INTERVAL 3 DAY) THEN mqls ELSE 0 END) as mql_3d, SUM(CASE WHEN date>=DATE_TRUNC(CURRENT_DATE(),WEEK(MONDAY)) THEN spend_with_iva ELSE 0 END) as gasto_sem, SUM(CASE WHEN date>=DATE_TRUNC(CURRENT_DATE(),WEEK(MONDAY)) THEN mqls ELSE 0 END) as mql_sem, SUM(CASE WHEN date>=DATE_SUB(CURRENT_DATE(),INTERVAL 7 DAY) THEN spend_with_iva ELSE 0 END) as gasto_7d, SUM(CASE WHEN date>=DATE_SUB(CURRENT_DATE(),INTERVAL 7 DAY) THEN mqls ELSE 0 END) as mql_7d, SUM(CASE WHEN date>=DATE_SUB(CURRENT_DATE(),INTERVAL 14 DAY) AND date<DATE_SUB(CURRENT_DATE(),INTERVAL 7 DAY) THEN spend_with_iva ELSE 0 END) as gasto_prev7d, SUM(CASE WHEN date>=DATE_SUB(CURRENT_DATE(),INTERVAL 14 DAY) AND date<DATE_SUB(CURRENT_DATE(),INTERVAL 7 DAY) THEN mqls ELSE 0 END) as mql_prev7d FROM `" + GCP_PROJECT + "." + BQ_DATASET + ".rpt_campaign_performance_daily` WHERE date>=DATE_SUB(CURRENT_DATE(),INTERVAL 14 DAY) GROUP BY 1,2,3,4 HAVING gasto_7d>10000) SELECT campaign_name,negocio,diplomado,platform, CASE WHEN mql_7d=0 AND gasto_7d>10000 THEN 'CRITICO' WHEN mql_7d>0 AND mql_prev7d>0 AND (gasto_7d/mql_7d)>(gasto_prev7d/mql_prev7d)*2 THEN 'CRITICO' WHEN mql_7d>0 AND mql_prev7d>0 AND (gasto_7d/mql_7d)>(gasto_prev7d/mql_prev7d)*1.5 THEN 'ALERTA' WHEN mql_7d>0 AND mql_prev7d>0 AND (gasto_7d/mql_7d)<(gasto_prev7d/mql_prev7d)*0.8 THEN 'BIEN' WHEN mql_7d>0 THEN 'ESTABLE' ELSE 'CRITICO' END as estado, CASE WHEN mql_7d=0 THEN 'SIN_MQL' WHEN mql_prev7d=0 THEN 'SIN_REF' WHEN (gasto_7d/mql_7d)>(gasto_prev7d/mql_prev7d)*1.2 THEN 'EMPEORANDO' WHEN (gasto_7d/mql_7d)<(gasto_prev7d/mql_prev7d)*0.8 THEN 'MEJORANDO' ELSE 'ESTABLE' END as tendencia, ROUND(gasto_ayer) as gasto_ayer, CASE WHEN mql_ayer>0 THEN ROUND(gasto_ayer/mql_ayer) END as cpl_ayer, mql_ayer, ROUND(gasto_3d) as gasto_3d, CASE WHEN mql_3d>0 THEN ROUND(gasto_3d/mql_3d) END as cpl_3d, mql_3d, ROUND(gasto_sem) as gasto_sem, CASE WHEN mql_sem>0 THEN ROUND(gasto_sem/mql_sem) END as cpl_sem, mql_sem, ROUND(gasto_7d) as gasto_7d, CASE WHEN mql_7d>0 THEN ROUND(gasto_7d/mql_7d) END as cpl_7d, mql_7d FROM ventanas ORDER BY CASE WHEN mql_7d=0 AND gasto_7d>10000 THEN 1 WHEN mql_7d>0 AND mql_prev7d>0 AND (gasto_7d/mql_7d)>(gasto_prev7d/mql_prev7d)*2 THEN 1 WHEN mql_7d>0 AND mql_prev7d>0 AND (gasto_7d/mql_7d)>(gasto_prev7d/mql_prev7d)*1.5 THEN 2 WHEN mql_7d>0 AND mql_prev7d>0 AND (gasto_7d/mql_7d)<(gasto_prev7d/mql_prev7d)*0.8 THEN 4 WHEN mql_7d>0 THEN 3 ELSE 1 END, gasto_7d DESC LIMIT 30\n\nUsa esta query para preguntas sobre campanas criticas, rendimiento, estado general. Adapta filtros segun la pregunta.\n\nPara gasto simple: SELECT platform,ROUND(SUM(spend_with_iva)) as gasto,SUM(impressions) as imp,SUM(clicks) as clicks,SUM(mqls) as mqls FROM `" + GCP_PROJECT + "." + BQ_DATASET + ".rpt_campaign_performance_daily` WHERE date=DATE_SUB(CURRENT_DATE(),INTERVAL 1 DAY) GROUP BY 1\n\nPara CPL por diplomado: SELECT negocio,diplomado,platform,ROUND(SUM(spend_with_iva)) as gasto,SUM(mqls) as mqls,CASE WHEN SUM(mqls)>0 THEN ROUND(SUM(spend_with_iva)/SUM(mqls)) END as cpl FROM `" + GCP_PROJECT + "." + BQ_DATASET + ".rpt_campaign_performance_daily` WHERE date>=DATE_SUB(CURRENT_DATE(),INTERVAL 7 DAY) GROUP BY 1,2,3 HAVING gasto>10000 ORDER BY gasto DESC LIMIT 30\n\nPresenta resultados con emojis de estado, tablas markdown, y recomendaciones accionables.\n\nCONTEXTO DE UANDES ONLINE:\n- Universidad de los Andes (Chile), educacion continua: diplomados, magisters, cursos para profesionales.\n- Web: uandesonline.cl. Facultades: Medicina, Derecho, Enfermeria, Educacion, ICOM (negocios), ICF.\n- Publico objetivo: profesionales 25-55 anos que buscan especializacion/postgrado.\n- Competencia: universidades chilenas con educacion online (PUC, UDP, UNAB, USS, etc).\n- Mercado: educacion online/postgrado en Chile y LATAM.\n\nBUSQUEDA WEB — Usa web_search cuando:\n- El cliente pregunte POR QUE sube el CPL o baja el rendimiento (buscar factores externos: estacionalidad, competencia, noticias educacion).\n- Pida recomendaciones estrategicas (buscar tendencias, benchmarks del mercado).\n- Pregunte sobre competencia, mercado educativo, tendencias.\n- Quiera entender factores externos que afecten las campanas.\n- Busca en sitios como: emol.com, latercera.com, mineduc.cl, elmostrador.com, educacion online chile.\n\nCuando uses web_search, PRIMERO consulta BigQuery para tener los datos internos, LUEGO busca contexto externo para complementar el analisis. Combina ambas fuentes en tu respuesta.";
 
-var TOOLS = [{
+var BQ_TOOL = {
   name: "run_bigquery_query",
   description: "Ejecuta SQL en BigQuery. Tablas: `perfomance-490910.uandes_marketing.tabla`",
   input_schema: {
@@ -62,7 +62,13 @@ var TOOLS = [{
     properties: { sql: { type: "string", description: "SQL BigQuery Standard" } },
     required: ["sql"],
   },
-}];
+};
+
+var WEB_SEARCH_TOOL = {
+  type: "web_search_20250305",
+  name: "web_search",
+  max_uses: 3,
+};
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -88,13 +94,14 @@ export default async function handler(req, res) {
 
       var claudeResp = null;
       var retries = 0;
-      // Force tool use on round 1, auto on subsequent rounds
+      // Force BQ tool on round 1, auto on subsequent (allows web search too)
       var toolChoice = rounds === 1 ? {type:"tool",name:"run_bigquery_query"} : {type:"auto"};
+      var allTools = [BQ_TOOL, WEB_SEARCH_TOOL];
       while (retries < 2) {
         claudeResp = await fetch("https://api.anthropic.com/v1/messages", {
           method: "POST",
           headers: { "Content-Type": "application/json", "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
-          body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 2048, system: SYSTEM_PROMPT, tools: TOOLS, tool_choice: toolChoice, messages: currentMessages }),
+          body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 2048, system: SYSTEM_PROMPT, tools: allTools, tool_choice: toolChoice, messages: currentMessages }),
         });
         if (claudeResp.status === 529 && retries < 1) {
           console.log("[R" + rounds + "] 529 overloaded, retrying in 3s...");
@@ -122,23 +129,37 @@ export default async function handler(req, res) {
       if (cd.stop_reason === "tool_use") {
         currentMessages.push({ role: "assistant", content: cd.content });
         var results = [];
+        var hasServerTools = false;
         for (var i = 0; i < cd.content.length; i++) {
           var b = cd.content[i];
+          // Skip web_search server tool results — they're handled by the API automatically
+          if (b.type === "server_tool_use" || b.type === "web_search_tool_result") {
+            hasServerTools = true;
+            continue;
+          }
           if (b.type !== "tool_use") continue;
-          var sql = b.input ? b.input.sql : null;
-          if (!sql) { results.push({ type:"tool_result", tool_use_id:b.id, content:"{\"error\":\"no sql\"}", is_error:true }); continue; }
-          try {
-            console.log("[BQ] " + sql.substring(0,150));
-            var qr = await runBigQueryQuery(sql, accessToken);
-            var rs = JSON.stringify(qr);
-            if (rs.length > 12000) { qr.rows = qr.rows.slice(0,30); qr.note = "Truncado a 30 filas"; rs = JSON.stringify(qr); }
-            results.push({ type:"tool_result", tool_use_id:b.id, content:rs });
-          } catch(e) {
-            console.error("[BQ] " + e.message);
-            results.push({ type:"tool_result", tool_use_id:b.id, content:JSON.stringify({error:e.message}), is_error:true });
+          
+          if (b.name === "run_bigquery_query") {
+            var sql = b.input ? b.input.sql : null;
+            if (!sql) { results.push({ type:"tool_result", tool_use_id:b.id, content:"{\"error\":\"no sql\"}", is_error:true }); continue; }
+            try {
+              console.log("[BQ] " + sql.substring(0,150));
+              var qr = await runBigQueryQuery(sql, accessToken);
+              var rs = JSON.stringify(qr);
+              if (rs.length > 12000) { qr.rows = qr.rows.slice(0,30); qr.note = "Truncado a 30 filas"; rs = JSON.stringify(qr); }
+              results.push({ type:"tool_result", tool_use_id:b.id, content:rs });
+            } catch(e) {
+              console.error("[BQ] " + e.message);
+              results.push({ type:"tool_result", tool_use_id:b.id, content:JSON.stringify({error:e.message}), is_error:true });
+            }
+          } else {
+            results.push({ type:"tool_result", tool_use_id:b.id, content:JSON.stringify({error:"Unknown tool: " + b.name}), is_error:true });
           }
         }
-        currentMessages.push({ role: "user", content: results });
+        // Only push tool results if we have BQ results to send back
+        if (results.length > 0) {
+          currentMessages.push({ role: "user", content: results });
+        }
         continue;
       }
 
