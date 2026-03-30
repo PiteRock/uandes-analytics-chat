@@ -78,18 +78,30 @@ export default async function handler(req, res) {
 
     var sa = parseServiceAccount();
     var accessToken = await getAccessToken(sa);
-    var currentMessages = messages.slice();
+    // Limit history to prevent context bloat
+    var currentMessages = messages.length > 4 ? messages.slice(-4) : messages.slice();
     var rounds = 0;
 
     while (rounds < MAX_TOOL_ROUNDS) {
       rounds++;
-      console.log("[R" + rounds + "] calling Claude");
+      console.log("[R" + rounds + "] calling Claude, msgs:" + currentMessages.length);
 
-      var claudeResp = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
-        body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 2048, system: SYSTEM_PROMPT, tools: TOOLS, messages: currentMessages }),
-      });
+      var claudeResp = null;
+      var retries = 0;
+      while (retries < 2) {
+        claudeResp = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
+          body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 2048, system: SYSTEM_PROMPT, tools: TOOLS, messages: currentMessages }),
+        });
+        if (claudeResp.status === 529 && retries < 1) {
+          console.log("[R" + rounds + "] 529 overloaded, retrying in 3s...");
+          await new Promise(function(r){ setTimeout(r, 3000); });
+          retries++;
+          continue;
+        }
+        break;
+      }
 
       if (!claudeResp.ok) {
         var et = await claudeResp.text();
