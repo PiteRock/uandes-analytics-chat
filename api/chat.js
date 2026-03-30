@@ -88,11 +88,13 @@ export default async function handler(req, res) {
 
       var claudeResp = null;
       var retries = 0;
+      // Force tool use on round 1, auto on subsequent rounds
+      var toolChoice = rounds === 1 ? {type:"tool",name:"run_bigquery_query"} : {type:"auto"};
       while (retries < 2) {
         claudeResp = await fetch("https://api.anthropic.com/v1/messages", {
           method: "POST",
           headers: { "Content-Type": "application/json", "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
-          body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 2048, system: SYSTEM_PROMPT, tools: TOOLS, messages: currentMessages }),
+          body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 2048, system: SYSTEM_PROMPT, tools: TOOLS, tool_choice: toolChoice, messages: currentMessages }),
         });
         if (claudeResp.status === 529 && retries < 1) {
           console.log("[R" + rounds + "] 529 overloaded, retrying in 3s...");
