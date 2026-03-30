@@ -4,7 +4,7 @@ const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const GCP_PROJECT = "perfomance-490910";
 const BQ_DATASET = "uandes_marketing";
 const CLAUDE_MODEL = "claude-sonnet-4-20250514";
-const MAX_TOOL_ROUNDS = 5;
+const MAX_TOOL_ROUNDS = 2;
 
 let cachedToken = null;
 let tokenExpiry = 0;
@@ -52,7 +52,7 @@ async function runBigQueryQuery(sql, accessToken) {
   return { totalRows: result.totalRows, columns: cols, rows: rows };
 }
 
-var SYSTEM_PROMPT = "Analista de marketing digital de UAndes Online con acceso a BigQuery.\n\nDataset: `" + GCP_PROJECT + "." + BQ_DATASET + "`\n\nTablas:\n- ads_hourly_unified: date,hour,platform(meta|google),campaign_name,campaign_id,cost_with_iva(CLP con IVA),impressions,clicks,reach,negocio,diplomado\n- FBADS_AD: DATE,AD_ID,AD_NAME,AD_GROUP_NAME,CAMPAIGN_NAME,COST(sin IVA),CLICKS,IMPRESSIONS,REACH\n- GOOGLEADS_AD: DATE,AD_ID,COST(sin IVA),CLICKS,IMPRESSIONS,CAMPAIGN_NAME\n- GOOGLEADS_KEYWORD: DATE,KEYWORD,QUALITY_SCORE,MATCH_TYPE,COST,CLICKS,IMPRESSIONS,CAMPAIGN_NAME\n- GOOGLEADS_SEARCH_QUERY: DATE,SEARCH_TERM,KEYWORD,COST,CLICKS,CONVERSIONS,CAMPAIGN_NAME\n- stg_hubspot_contacts_attributed: create_date(TIMESTAMP),detected_platform,conversion_mql(BOOLEAN)\n- dim_diplomado_mapping: campaign_name->diplomado->negocio\n\nReglas:\n- FBADS/GOOGLEADS COST sin IVA, x1.19 para CLP real. ads_hourly_unified ya tiene IVA.\n- CPL=Gasto con IVA/MQLs(conversion_mql=true). NUNCA por leads totales. CPL es la metrica principal, NO CPC.\n- Gasto con 0 MQLs=CRITICO.\n- Califica tablas: `" + GCP_PROJECT + "." + BQ_DATASET + ".tabla`\n- Responde en espanol. Montos CLP con punto miles.\n\nIMPORTANTE - EFICIENCIA: Usa SIEMPRE una UNICA query con JOINs. NUNCA hagas mas de 1 query por pregunta. Si necesitas gasto+MQLs+CPL, hazlo todo en una sola query.\n\nQuery base para CPL por diplomado (usa SIEMPRE para preguntas de rendimiento/criticas):\nSELECT a.negocio, a.diplomado, a.platform, SUM(a.cost_with_iva) as gasto, COUNT(DISTINCT CASE WHEN h.conversion_mql=true THEN FORMAT_TIMESTAMP('%Y%m%d%H%M%S',h.create_date) END) as mqls, CASE WHEN COUNT(DISTINCT CASE WHEN h.conversion_mql=true THEN FORMAT_TIMESTAMP('%Y%m%d%H%M%S',h.create_date) END)>0 THEN ROUND(SUM(a.cost_with_iva)/COUNT(DISTINCT CASE WHEN h.conversion_mql=true THEN FORMAT_TIMESTAMP('%Y%m%d%H%M%S',h.create_date) END)) ELSE NULL END as cpl, SUM(a.impressions) as impressions, SUM(a.clicks) as clicks FROM `perfomance-490910.uandes_marketing.ads_hourly_unified` a LEFT JOIN `perfomance-490910.uandes_marketing.stg_hubspot_contacts_attributed` h ON a.platform=h.detected_platform AND a.date=DATE(h.create_date) WHERE a.date >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY) GROUP BY 1,2,3 HAVING gasto>10000 ORDER BY gasto DESC LIMIT 30\n\nAdapta esta query segun el periodo o filtros que pida el usuario. Marca como CRITICO los que tienen gasto>0 y mqls=0.";
+var SYSTEM_PROMPT = "Analista de marketing digital de UAndes Online con acceso a BigQuery.\n\nDataset: `" + GCP_PROJECT + "." + BQ_DATASET + "`\n\nTablas:\n- ads_hourly_unified: date,hour,platform(meta|google),campaign_name,campaign_id,cost_with_iva(CLP con IVA),impressions,clicks,reach,negocio,diplomado\n- FBADS_AD: DATE,AD_ID,AD_NAME,AD_GROUP_NAME,CAMPAIGN_NAME,COST(sin IVA),CLICKS,IMPRESSIONS,REACH\n- GOOGLEADS_AD: DATE,AD_ID,COST(sin IVA),CLICKS,IMPRESSIONS,CAMPAIGN_NAME\n- GOOGLEADS_KEYWORD: DATE,KEYWORD,QUALITY_SCORE,MATCH_TYPE,COST,CLICKS,IMPRESSIONS,CAMPAIGN_NAME\n- GOOGLEADS_SEARCH_QUERY: DATE,SEARCH_TERM,KEYWORD,COST,CLICKS,CONVERSIONS,CAMPAIGN_NAME\n- stg_hubspot_contacts_attributed: create_date(TIMESTAMP),detected_platform,conversion_mql(INT64: 1=MQL,0=no)\n- dim_diplomado_mapping: campaign_name->diplomado->negocio\n\nReglas:\n- FBADS/GOOGLEADS COST sin IVA, x1.19 para CLP real. ads_hourly_unified ya tiene IVA.\n- CPL=Gasto con IVA/MQLs(conversion_mql=1). NUNCA por leads totales. CPL es la metrica principal, NO CPC.\n- Gasto con 0 MQLs=CRITICO.\n- conversion_mql es INT64 (1 o 0), NO boolean.\n- Califica tablas: `" + GCP_PROJECT + "." + BQ_DATASET + ".tabla`\n- Responde en espanol. Montos CLP con punto miles.\n\nIMPORTANTE: Usa SIEMPRE UNA UNICA query. NUNCA hagas mas de 1 query por pregunta.\n\nQuery base para CPL (usa y adapta para preguntas de rendimiento/criticas):\nSELECT COALESCE(a.negocio,'Sin asignar') as negocio, COALESCE(a.diplomado,a.campaign_name) as diplomado, a.platform, SUM(a.cost_with_iva) as gasto, SUM(a.impressions) as impressions, SUM(a.clicks) as clicks, (SELECT COUNT(*) FROM `perfomance-490910.uandes_marketing.stg_hubspot_contacts_attributed` h WHERE h.conversion_mql=1 AND h.detected_platform=a.platform AND DATE(h.create_date) BETWEEN DATE_SUB(CURRENT_DATE(),INTERVAL 7 DAY) AND CURRENT_DATE()) as mqls_plataforma FROM `perfomance-490910.uandes_marketing.ads_hourly_unified` a WHERE a.date>=DATE_SUB(CURRENT_DATE(),INTERVAL 7 DAY) GROUP BY 1,2,3 HAVING gasto>10000 ORDER BY gasto DESC LIMIT 30\n\nAdapta periodo/filtros segun el usuario. Marca CRITICO los que tienen gasto>0 y mqls=0.";
 
 var TOOLS = [{
   name: "run_bigquery_query",
@@ -132,7 +132,22 @@ export default async function handler(req, res) {
       return res.status(200).json({ response: ft || "Sin respuesta." });
     }
 
-    return res.status(200).json({ response: "Limite de consultas alcanzado. Reformula tu pregunta." });
+    // Rounds exhausted — force Claude to answer with whatever data it has
+    console.log("[FINAL] Forcing answer without tools");
+    try {
+      currentMessages.push({ role: "user", content: [{ type: "text", text: "Ya tienes suficientes datos. Responde ahora con lo que tienes. No hagas mas queries." }] });
+      var finalResp = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
+        body: JSON.stringify({ model: CLAUDE_MODEL, max_tokens: 2048, system: SYSTEM_PROMPT, messages: currentMessages }),
+      });
+      if (finalResp.ok) {
+        var fd = await finalResp.json();
+        var ft = fd.content ? fd.content.filter(function(b){return b.type==="text"}).map(function(b){return b.text}).join("\n") : "";
+        if (ft) return res.status(200).json({ response: ft });
+      }
+    } catch(e) { console.error("[FINAL] " + e.message); }
+    return res.status(200).json({ response: "No se pudo completar el analisis. Intenta con una pregunta mas especifica." });
   } catch (err) {
     console.error("[FATAL]", err);
     return res.status(500).json({ error: "Error interno", detail: err.message });
