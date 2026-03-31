@@ -80,23 +80,24 @@ async function runBigQuery(sql) {
     Object.fromEntries(fields.map((f, i) => [f, r.f[i].v]))
   );
 
-  // Truncate
+  // Truncate rows
   let result = rows.slice(0, MAX_BQ_ROWS);
-  let resultStr = JSON.stringify(result);
-  if (resultStr.length > MAX_BQ_BYTES) {
-    while (result.length > 1 && JSON.stringify(result).length > MAX_BQ_BYTES) {
-      result.pop();
+
+  // Format as compact text table (much smaller than JSON, no [object Object] issues)
+  const header = fields.join(' | ');
+  const dataRows = result.map((r) => fields.map((f) => r[f] ?? 'NULL').join(' | '));
+  let textResult = `${header}\n${dataRows.join('\n')}`;
+
+  // Truncate by bytes if needed
+  if (textResult.length > MAX_BQ_BYTES) {
+    const lines = textResult.split('\n');
+    while (lines.length > 2 && lines.join('\n').length > MAX_BQ_BYTES) {
+      lines.pop();
     }
-    resultStr = JSON.stringify(result);
+    textResult = lines.join('\n');
   }
 
-  return {
-    total_rows: data.totalRows,
-    returned_rows: result.length,
-    truncated: rows.length > result.length,
-    columns: fields,
-    data: result,
-  };
+  return `${data.totalRows} rows total, showing ${result.length}.\n${textResult}`;
 }
 
 // ─── TODAY helper ───────────────────────────────────────────────────────────
@@ -314,14 +315,13 @@ export default async function handler(req, res) {
         if (toolCall.name === 'run_bigquery_query') {
           try {
             console.log(`[BQ Round ${round + 1}] ${toolCall.input.purpose || 'query'}`);
-            const bqResult = await runBigQuery(toolCall.input.sql);
-            result = JSON.stringify(bqResult);
+            result = await runBigQuery(toolCall.input.sql);
           } catch (err) {
             console.error(`[BQ Error] ${err.message}`);
-            result = JSON.stringify({ error: err.message });
+            result = `Error: ${err.message}`;
           }
         } else {
-          result = JSON.stringify({ error: `Unknown tool: ${toolCall.name}` });
+          result = `Error: Unknown tool ${toolCall.name}`;
         }
 
         toolResults.push({
