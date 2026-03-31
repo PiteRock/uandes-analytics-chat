@@ -165,9 +165,8 @@ extracted_campaign_id(JOIN key), amount_in_company_currency(CLP normalizado), de
 1. SIEMPRE ejecutar BigQuery antes de responder
 2. **CRÍTICO: Hacer UNA SOLA query que traiga TODA la data necesaria (periodo actual + anterior en la misma query con CTEs). NUNCA hacer queries secuenciales. Tienes max 60s total.**
 3. Preguntas ventas/metas/TC/CAC → query funnel con stg_hubspot_deals_attributed
-4. Web search solo para contexto mercado. Max ${MAX_WEB_SEARCHES}
-5. Responder en español
-6. Después de recibir los datos, responder INMEDIATAMENTE con el análisis. NO pedir más datos.
+4. Responder en español
+5. Después de recibir los datos, responder INMEDIATAMENTE con el análisis. NO pedir más datos.
 
 ## NUNCA
 ❌ Frases vagas ❌ Sin datos ❌ Acciones genéricas ❌ Omitir plataforma ❌ Omitir campañas ❌ Ignorar TC/CAC en ventas ❌ Hacer múltiples queries secuenciales (usar CTEs)`;
