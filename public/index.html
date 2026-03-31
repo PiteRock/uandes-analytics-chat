@@ -63,7 +63,7 @@
     .message { max-width: 85%; padding: 14px 18px; border-radius: 18px; font-size: 14.5px; line-height: 1.65; animation: fadeIn 0.2s ease; }
     @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
     .message-user { align-self: flex-end; background: var(--accent); color: white; border-bottom-right-radius: 6px; }
-    .message-assistant { align-self: flex-start; background: var(--bg-secondary); border: 1px solid var(--border); border-bottom-left-radius: 6px; max-width: 92%; }
+    .message-assistant { align-self: flex-start; background: var(--bg-secondary); border: 1px solid var(--border); border-bottom-left-radius: 6px; max-width: 92%; overflow: hidden; }
     .message-assistant .msg-content { color: var(--text-primary); }
 
     /* ─── STATUS / THINKING ──────────────────────────────── */
@@ -106,6 +106,7 @@
       border: 1px solid var(--border);
       border-radius: var(--radius-sm);
       -webkit-overflow-scrolling: touch;
+      max-width: 100%;
     }
     .msg-content .table-wrapper::-webkit-scrollbar { height: 6px; }
     .msg-content .table-wrapper::-webkit-scrollbar-track { background: var(--bg-tertiary); }
