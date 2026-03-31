@@ -1,5 +1,5 @@
 // api/chat.js — UAndes Analytics Chat (Vercel Serverless Function)
-// Stack: Claude API (tool-use), BigQuery, ESM
+// Stack: Claude API (tool-use + web search), BigQuery, ESM
 // Produces CAUSAL and OPERATIVE analysis, not descriptive.
 
 import jwt from 'jsonwebtoken';
@@ -9,10 +9,10 @@ export const config = { maxDuration: 60 };
 // ─── CONSTANTS ──────────────────────────────────────────────────────────────
 const BQ_PROJECT = 'perfomance-490910';
 const BQ_DATASET = 'uandes_marketing';
-const MAX_BQ_ROWS = 50;
-const MAX_BQ_BYTES = 15000;
+const MAX_BQ_ROWS = 30;
+const MAX_BQ_BYTES = 8000;
 const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
-const MAX_TOKENS = 3000;
+const MAX_TOKENS = 2048;
 
 // ─── BigQuery OAuth Token Cache ─────────────────────────────────────────────
 let cachedToken = null;
@@ -78,12 +78,15 @@ async function runBigQuery(sql) {
     Object.fromEntries(fields.map((f, i) => [f, r.f[i].v]))
   );
 
+  // Truncate rows
   let result = rows.slice(0, MAX_BQ_ROWS);
 
+  // Format as compact text table (much smaller than JSON, no [object Object] issues)
   const header = fields.join(' | ');
   const dataRows = result.map((r) => fields.map((f) => r[f] ?? 'NULL').join(' | '));
   let textResult = `${header}\n${dataRows.join('\n')}`;
 
+  // Truncate by bytes if needed
   if (textResult.length > MAX_BQ_BYTES) {
     const lines = textResult.split('\n');
     while (lines.length > 2 && lines.join('\n').length > MAX_BQ_BYTES) {
@@ -174,7 +177,7 @@ const customTools = [
   {
     name: 'run_bigquery_query',
     description:
-      'Execute a SQL query against BigQuery to get campaign performance data. ALWAYS use this tool before answering data questions. Returns rows as text.',
+      'Execute a SQL query against BigQuery to get campaign performance data. ALWAYS use this tool before answering data questions. Returns rows as JSON.',
     input_schema: {
       type: 'object',
       properties: {
@@ -195,6 +198,7 @@ const customTools = [
 
 // ─── MAIN HANDLER ───────────────────────────────────────────────────────────
 export default async function handler(req, res) {
+  // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-API-Key');
@@ -209,18 +213,21 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'messages array required' });
     }
 
+    // Limit history to last 4 messages
     const recentMessages = userMessages.slice(-4).map((m) => ({
       role: m.role,
       content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
     }));
 
     const systemPrompt = buildSystemPrompt();
+
+    // Tool-use loop: Round 1 = forced BQ query, Round 2 = text response (no tools)
     let messages = [...recentMessages];
     let finalText = '';
 
     // ─── ROUND 1: Force BigQuery query ───────────────────────
     console.log(`[Round 1] Starting. Elapsed: ${Date.now() - startTime}ms`);
-
+    
     const round1Body = {
       model: CLAUDE_MODEL,
       max_tokens: 1024,
@@ -244,11 +251,13 @@ export default async function handler(req, res) {
 
     const toolUseBlock = round1Response.content.find((b) => b.type === 'tool_use');
     if (!toolUseBlock) {
+      // Claude didn't use the tool — extract any text
       finalText = round1Response.content
         .filter((b) => b.type === 'text')
         .map((b) => b.text)
         .join('\n') || 'No se pudo generar la consulta. Intenta de nuevo.';
     } else {
+      // Execute BQ query
       let bqResult;
       try {
         console.log(`[BQ] ${toolUseBlock.input.purpose || 'query'}`);
@@ -280,6 +289,7 @@ export default async function handler(req, res) {
         max_tokens: MAX_TOKENS,
         system: systemPrompt,
         messages,
+        // NO tools = Claude MUST respond with text only
       };
 
       let round2Response;
@@ -290,18 +300,24 @@ export default async function handler(req, res) {
           await sleep(3000);
           round2Response = await callClaude(round2Body);
         } else {
-          throw err;
+          // If Claude fails, return the raw data as fallback
+          console.error(`[Round 2] Claude error: ${err.message}`);
+          finalText = `Error al generar análisis. Datos crudos de BigQuery:\n\n\`\`\`\n${String(bqResult).slice(0, 2000)}\n\`\`\``;
+          round2Response = null;
         }
       }
 
-      const textBlocks = round2Response.content.filter((b) => b.type === 'text');
-      finalText = textBlocks.map((b) => b.text).join('\n');
+      if (round2Response) {
+        const textBlocks = round2Response.content.filter((b) => b.type === 'text');
+        finalText = textBlocks.map((b) => b.text).join('\n');
+      }
 
       console.log(`[Round 2] Done. Text: ${finalText.length} chars. Elapsed: ${Date.now() - startTime}ms`);
     }
 
     const responseTime = Date.now() - startTime;
 
+    // Fallback if no text was generated
     if (!finalText || finalText.trim() === '') {
       console.error(`[Chat] No text generated. Response time: ${responseTime}ms`);
       finalText = 'Error: No se pudo generar una respuesta. Por favor intenta de nuevo.';
@@ -309,6 +325,7 @@ export default async function handler(req, res) {
 
     console.log(`[Chat] Response generated in ${responseTime}ms, length: ${finalText.length}`);
 
+    // Return JSON response
     return res.status(200).json({
       response: finalText,
       response_time_ms: responseTime,
