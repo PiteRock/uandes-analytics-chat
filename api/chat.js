@@ -200,9 +200,14 @@ ORDER BY a.gasto DESC
 - Usa negrita para métricas críticas
 - Usa emoji ⚠️ para alertas, 🔴 para crítico, 🟡 para atención, 🟢 para OK
 - Ordena siempre por severidad (más crítico primero)
-- **REGLA CRÍTICA: Si dices "hay N campañas" DEBES mostrar las N campañas en la tabla, no solo las top 5. El cliente necesita visibilidad completa.**
-- Si hay más de 15 campañas, usa una tabla compacta (menos columnas) pero SIEMPRE muestra TODAS
 - Cuando menciones una campaña en texto (fuera de tabla), SIEMPRE indicar la plataforma entre paréntesis: "BAS-CON-MED (Meta)" o "EDU_NO_APL (Google)"
+
+### REGLA DE COMPLETITUD (NO NEGOCIABLE)
+El cliente SIEMPRE quiere ver TODAS las campañas, no solo las top 5 o top 10. Si analizas N campañas:
+1. Primero muestra una tabla detallada de las top 5-8 más críticas (con todas las métricas de descomposición)
+2. Luego OBLIGATORIAMENTE muestra una **tabla resumen COMPLETA de las N campañas** con columnas compactas: Campaña | Plataforma | Gasto | CPL | Diagnóstico | Link
+3. NUNCA omitas campañas. Si dices "22 campañas", las 22 deben aparecer en la tabla resumen.
+4. Si hay muchas campañas (>15), la tabla resumen puede tener menos columnas, pero DEBE incluir TODAS las filas.
 
 ## GLOSARIO (incluir la primera vez que uses cada sigla)
 Al usar estas siglas en el análisis, SIEMPRE incluir su definición la primera vez:
