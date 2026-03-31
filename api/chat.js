@@ -314,7 +314,7 @@ export default async function handler(req, res) {
 
     // Fallback if no text was generated
     if (!finalText || finalText.trim() === '') {
-      console.error(`[Chat] No text generated after ${MAX_TOOL_ROUNDS} rounds. Response time: ${responseTime}ms`);
+      console.error(`[Chat] No text generated. Response time: ${responseTime}ms`);
       finalText = 'Error: No se pudo generar una respuesta. Por favor intenta de nuevo.';
     }
 
