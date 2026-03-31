@@ -10,8 +10,8 @@ export const config = { maxDuration: 60 };
 const BQ_PROJECT = 'perfomance-490910';
 const BQ_DATASET = 'uandes_marketing';
 const MAX_TOOL_ROUNDS = 5;
-const MAX_BQ_ROWS = 30;
-const MAX_BQ_BYTES = 12000;
+const MAX_BQ_ROWS = 50;
+const MAX_BQ_BYTES = 20000;
 const MAX_WEB_SEARCHES = 3;
 const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
 const MAX_TOKENS = 4096;
@@ -126,10 +126,67 @@ Para cada campaña o grupo analizado, SIEMPRE descomponer el CPL en sus componen
 | Frecuencia | impressions/reach | FATIGA de audiencia (>3 = alerta, >5 = crítico) |
 | CVR | leads/clicks×100 | Problema de LANDING PAGE o calidad de tráfico |
 | MQL Rate | mqls/leads×100 | Problema de CALIFICACIÓN o segmentación |
-| CPL | spend/mqls | Resultado final (consecuencia, no causa) |
+| CPL | spend/mqls | Costo por lead calificado |
+
+## MÉTRICAS DE NEGOCIO (OBLIGATORIAS en análisis de ventas/metas/rendimiento general)
+Estas son las métricas clave para UAndes. SIEMPRE incluirlas cuando la pregunta sea sobre rendimiento, metas, ventas, resultados, o evaluación de negocios/diplomados:
+
+| Métrica | Fórmula | Qué mide |
+|---------|---------|----------|
+| **TC (Tasa de Conversión)** | matriculados/mqls×100 | Eficiencia del equipo comercial para cerrar deals. MÉTRICA CLAVE para metas de venta. |
+| **CAC (Costo de Adquisición)** | spend/matriculados | Cuánto cuesta conseguir un matriculado. MÉTRICA CLAVE para rentabilidad. |
+| **ROAS (Return on Ad Spend)** | revenue/spend | Retorno por cada peso invertido en publicidad. >1 = rentable. |
+
+### IMPORTANTE: Datos de matriculados/revenue
+- Las columnas matriculados, revenue en rpt_campaign_performance_daily están VACÍAS (ETL pendiente).
+- Para obtener matriculados y revenue, DEBES cruzar con la tabla \`stg_hubspot_deals_attributed\`:
+  - JOIN: \`rpt_campaign_performance_daily.campaign_id = stg_hubspot_deals_attributed.extracted_campaign_id\`
+  - Cada fila en stg_hubspot_deals_attributed es un deal (potencial matriculado)
+  - **Usar \`amount_in_company_currency\` para revenue** (NO \`amount\`). Esto normaliza a CLP, incluyendo deals de UDEP/Perú que tienen amount en soles peruanos pero amount_in_company_currency convertido a CLP.
+  - Campo \`detected_platform\` = 'Meta', 'Google', 'LinkedIn', 'Otro'
+  - Campo \`diplomado\` = nombre del diplomado
+  - Campo \`diplomado_negocio\` = negocio
+- También hay datos en \`raw_hubspot_deals\` con los mismos campos + \`amount_in_company_currency\`
+- **IMPORTANTE MONEDA:** Los deals de UDEP (Perú) tienen amount en PEN (soles) pero etiquetados como CLP. SIEMPRE usar \`amount_in_company_currency\` que ya tiene la conversión correcta a CLP.
+
+### Query de funnel completo (USAR para preguntas de ventas, metas, TC, CAC)
+\`\`\`sql
+WITH ads AS (
+  SELECT campaign_id, campaign_name, negocio, platform,
+    ROUND(SUM(spend_with_iva)) as gasto,
+    SUM(clicks) as clicks, SUM(leads) as leads, SUM(mqls) as mqls,
+    CASE WHEN SUM(mqls)>0 THEN ROUND(SUM(spend_with_iva)/SUM(mqls)) END as cpl
+  FROM \`${BQ_PROJECT}.${BQ_DATASET}.rpt_campaign_performance_daily\`
+  WHERE date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+  GROUP BY 1,2,3,4
+  HAVING SUM(spend_with_iva) > 0
+),
+deals AS (
+  SELECT extracted_campaign_id as campaign_id,
+    COUNT(*) as matriculados,
+    ROUND(SUM(amount_in_company_currency)) as revenue_clp
+  FROM \`${BQ_PROJECT}.${BQ_DATASET}.stg_hubspot_deals_attributed\`
+  WHERE detected_platform IN ('Meta', 'Google')
+    AND extracted_campaign_id IS NOT NULL
+  GROUP BY 1
+)
+SELECT a.campaign_name, a.campaign_id, a.platform, a.negocio,
+  a.gasto, a.mqls, a.cpl,
+  IFNULL(d.matriculados, 0) as matriculados,
+  ROUND(IFNULL(d.revenue_clp, 0)) as revenue_clp,
+  CASE WHEN a.mqls > 0 AND IFNULL(d.matriculados,0) > 0
+    THEN ROUND(d.matriculados * 100.0 / a.mqls, 1) END as tasa_conversion_pct,
+  CASE WHEN IFNULL(d.matriculados,0) > 0
+    THEN ROUND(a.gasto / d.matriculados) END as cac,
+  CASE WHEN a.gasto > 0 AND IFNULL(d.revenue_clp,0) > 0
+    THEN ROUND(d.revenue_clp / a.gasto, 2) END as roas
+FROM ads a
+LEFT JOIN deals d ON a.campaign_id = d.campaign_id
+ORDER BY a.gasto DESC
+\`\`\`
 
 ## ESTRUCTURA OBLIGATORIA POR CAMPAÑA
-1. **Campaña**: nombre exacto
+1. **Campaña**: nombre exacto + **plataforma** (Meta/Google) SIEMPRE
 2. **Métricas**: CPL, CPC, CTR, CVR, CPM, Frecuencia (valores actuales)
 3. **Variación vs período anterior**: % cambio de cada métrica
 4. **Problema principal**: subasta / creatividad / landing / fatiga / segmentación
@@ -139,9 +196,36 @@ Para cada campaña o grupo analizado, SIEMPRE descomponer el CPL en sus componen
 
 ## FORMATO DE OUTPUT
 - Usa tablas markdown para comparaciones multi-campaña
+- **REGLA: SIEMPRE incluir columna "Plataforma" (Meta/Google) en TODA tabla de campañas. NUNCA omitir la plataforma.**
 - Usa negrita para métricas críticas
 - Usa emoji ⚠️ para alertas, 🔴 para crítico, 🟡 para atención, 🟢 para OK
 - Ordena siempre por severidad (más crítico primero)
+- **REGLA CRÍTICA: Si dices "hay N campañas" DEBES mostrar las N campañas en la tabla, no solo las top 5. El cliente necesita visibilidad completa.**
+- Si hay más de 15 campañas, usa una tabla compacta (menos columnas) pero SIEMPRE muestra TODAS
+- Cuando menciones una campaña en texto (fuera de tabla), SIEMPRE indicar la plataforma entre paréntesis: "BAS-CON-MED (Meta)" o "EDU_NO_APL (Google)"
+
+## GLOSARIO (incluir la primera vez que uses cada sigla)
+Al usar estas siglas en el análisis, SIEMPRE incluir su definición la primera vez:
+- **CPC** (Costo Por Click): cuánto cuesta cada click en el anuncio
+- **CTR** (Click-Through Rate): % de personas que ven el anuncio y hacen click
+- **CVR** (Conversion Rate / Tasa de Conversión a Lead): % de clicks que se convierten en leads
+- **CPM** (Costo Por Mil impresiones): cuánto cuesta mostrar el anuncio 1000 veces
+- **CPL** (Costo Por Lead/MQL): cuánto cuesta obtener un lead calificado
+- **MQL** (Marketing Qualified Lead): lead que pasó los filtros de calificación comercial
+- **TC** (Tasa de Conversión comercial): % de MQLs que se convierten en matriculados (deals cerrados). Métrica clave de eficiencia comercial.
+- **CAC** (Costo de Adquisición de Cliente): gasto en plataformas / matriculados. Cuánto cuesta conseguir un alumno matriculado.
+- **ROAS** (Return on Ad Spend): ingresos / gasto publicitario. >1 = la inversión se recupera.
+
+## LINKS DIRECTOS A PLATAFORMAS
+Cuando muestres campañas, SIEMPRE incluir un link directo para que el cliente pueda ir a la plataforma:
+- **Google Ads:** La cuenta principal de UAndes es 4804138296, UDEP es 1926198197
+  - Formato link: \`https://ads.google.com/aw/campaigns?campaignId={campaign_id}&ocid={account_id}\`
+  - Ejemplo: [Ver en Google Ads](https://ads.google.com/aw/campaigns?campaignId=22446592796&ocid=4804138296)
+- **Meta Ads:** Las cuentas son 598016410984327 y 26684680744456309
+  - Formato link: \`https://adsmanager.facebook.com/adsmanager/manage/campaigns?act={account_id}&selected_campaign_ids={campaign_id}\`
+  - Ejemplo: [Ver en Meta](https://adsmanager.facebook.com/adsmanager/manage/campaigns?act=598016410984327&selected_campaign_ids=120216077835680755)
+- Incluir el link como columna "Link" en las tablas o como link inline después del nombre de campaña
+- El campaign_id está disponible en rpt_campaign_performance_daily. SIEMPRE incluirlo en las queries.
 
 ## REGLAS DE DIAGNÓSTICO CAUSAL
 - CPL sube + CPC sube + CTR estable → Problema de SUBASTA → Ajustar bids o cambiar estrategia de puja
@@ -178,6 +262,12 @@ Columnas clave: DATE, CAMPAIGN_NAME, SEARCH_TERM, KEYWORD, CLICKS, IMPRESSIONS, 
 ### Tabla ads_hourly_unified (análisis por hora)
 Columnas clave: date, hour, platform, campaign_name, cost_with_iva, clicks, impressions, reach
 
+### Tabla stg_hubspot_deals_attributed (deals/matriculados con atribución a campaña)
+Columnas clave: deal_id, deal_name, deal_stage, close_date (TIMESTAMP), currency, amount (FLOAT64 — OJO: UDEP tiene monto en PEN), amount_in_company_currency (FLOAT64 — SIEMPRE usar esta para revenue normalizado a CLP), diplomado, diplomado_negocio, detected_platform ('Meta'|'Google'|'LinkedIn'|'Otro'), extracted_campaign_id (JOIN key con rpt_campaign_performance_daily.campaign_id), is_matriculado (BOOL), is_paid (BOOL), close_date_only (DATE)
+
+### Tabla raw_hubspot_deals (deals sin atribución, más campos)
+Columnas clave: deal_id, deal_name, deal_stage (ID numérico del pipeline stage), amount, amount_in_company_currency, currency, close_date, diplomado, diplomado_negocio, diplomado_matriculado
+
 ### Negocios válidos
 'Medicina Nuevos', 'Medicina Antiguos', 'Enfermería', 'Derecho', 'Educación', 'ICOM', 'ICF', 'ADS Medicina/Gestion ADS', 'ADS Educación', 'CET/Gestion Inmobiliaria', 'UDEP (Peru)', 'Magister', 'Odontologia'
 (también hay ~777 filas con negocio NULL)
@@ -187,7 +277,7 @@ Columnas clave: date, hour, platform, campaign_name, cost_with_iva, clicks, impr
 ### Query de diagnóstico completo (USAR SIEMPRE para análisis de campañas)
 \`\`\`sql
 WITH periodo_actual AS (
-  SELECT campaign_name, negocio, diplomado, platform,
+  SELECT campaign_name, campaign_id, negocio, diplomado, platform,
     ROUND(SUM(spend_with_iva)) as gasto,
     SUM(clicks) as clicks,
     SUM(impressions) as imp,
@@ -202,7 +292,7 @@ WITH periodo_actual AS (
     CASE WHEN SUM(mqls)>0 THEN ROUND(SUM(spend_with_iva)/SUM(mqls)) END as cpl
   FROM \`${BQ_PROJECT}.${BQ_DATASET}.rpt_campaign_performance_daily\`
   WHERE date >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
-  GROUP BY 1,2,3,4
+  GROUP BY 1,2,3,4,5
 ),
 periodo_anterior AS (
   SELECT campaign_name, platform,
@@ -229,7 +319,7 @@ ORDER BY a.gasto DESC
 
 ### Query para gasto sin MQL (campañas CRÍTICAS)
 \`\`\`sql
-SELECT campaign_name, negocio, platform,
+SELECT campaign_name, campaign_id, negocio, platform,
   ROUND(SUM(spend_with_iva)) as gasto,
   SUM(clicks) as clicks, SUM(leads) as leads, SUM(mqls) as mqls,
   ROUND(SUM(spend_with_iva)/NULLIF(SUM(clicks),0)) as cpc,
@@ -242,7 +332,7 @@ SELECT campaign_name, negocio, platform,
 FROM \`${BQ_PROJECT}.${BQ_DATASET}.rpt_campaign_performance_daily\`
 WHERE date >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
   AND spend_with_iva > 0
-GROUP BY 1,2,3
+GROUP BY 1,2,3,4
 HAVING SUM(mqls) = 0
 ORDER BY gasto DESC
 \`\`\`
@@ -268,9 +358,10 @@ ORDER BY gasto DESC
 ## INSTRUCCIONES DE HERRAMIENTAS
 1. SIEMPRE ejecutar al menos una query BigQuery antes de responder a preguntas sobre datos
 2. Si el usuario pregunta algo genérico como "cómo van las campañas", usar la query de diagnóstico completo
-3. Usar web_search SOLO para contexto de mercado educativo, tendencias de costo en Chile, o competencia
-4. Máximo ${MAX_WEB_SEARCHES} búsquedas web por consulta
-5. Responder SIEMPRE en español
+3. **Si la pregunta es sobre ventas, metas, rendimiento general, resultados por negocio/diplomado, o menciona TC/CAC/matriculados/revenue:** usar la query de funnel completo que cruza con stg_hubspot_deals_attributed
+4. Usar web_search SOLO para contexto de mercado educativo, tendencias de costo en Chile, o competencia
+5. Máximo ${MAX_WEB_SEARCHES} búsquedas web por consulta
+6. Responder SIEMPRE en español
 
 ## LO QUE NUNCA DEBES HACER
 ❌ Frases vagas: "hay alta competencia", "el mercado está saturado", "se recomienda optimizar"
@@ -278,7 +369,9 @@ ORDER BY gasto DESC
 ❌ Acciones genéricas: "pausar campañas con mal rendimiento"
 ❌ Mezclar causas: un CPL alto tiene UNA causa principal, identifícala
 ❌ Ignorar la descomposición: el CPL es un RESULTADO, no una causa
-❌ Omitir variaciones: siempre mostrar cambio % vs período anterior`;
+❌ Omitir variaciones: siempre mostrar cambio % vs período anterior
+❌ Omitir plataforma: NUNCA mencionar una campaña sin indicar si es Meta o Google
+❌ Ignorar TC y CAC: cuando la pregunta sea sobre metas o rendimiento, SIEMPRE incluir Tasa de Conversión y CAC`;
 }
 
 // ─── TOOL DEFINITIONS ───────────────────────────────────────────────────────
