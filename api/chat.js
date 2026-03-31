@@ -72,8 +72,8 @@ async function runBigQuery(sql) {
   );
 
   const data = await resp.json();
-  if (data.error) return { error: data.error.message || JSON.stringify(data.error) };
-  if (!data.jobComplete) return { error: 'Query timeout after 30s' };
+  if (data.error) return `Error: ${data.error.message || JSON.stringify(data.error)}`;
+  if (!data.jobComplete) return 'Error: Query timeout after 30s';
 
   const fields = (data.schema?.fields || []).map((f) => f.name);
   const rows = (data.rows || []).map((r) =>
