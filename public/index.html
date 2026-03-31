@@ -225,31 +225,29 @@
     var conversationHistory = [];
     var isStreaming = false;
 
-    // ─── MARKDOWN SETUP with custom renderer ────────────────
-    var renderer = new marked.Renderer();
-
-    // All links open in new tab
-    renderer.link = function(href, title, text) {
-      // marked v4+ passes object, v3 passes individual args
-      if (typeof href === 'object') { text = href.text; title = href.title; href = href.href; }
-      var titleAttr = title ? ' title="' + title + '"' : '';
-      return '<a href="' + href + '" target="_blank" rel="noopener noreferrer"' + titleAttr + '>' + text + '</a>';
-    };
-
-    // Wrap tables in scrollable container
-    renderer.table = function(header, body) {
-      // marked v4+ passes object
-      if (typeof header === 'object') { body = header.rows; header = header.header; }
-      return '<div class="table-wrapper"><table><thead>' + header + '</thead><tbody>' + body + '</tbody></table></div>';
-    };
-
+    // ─── MARKDOWN SETUP ────────────────────────────────────
     marked.setOptions({
       breaks: true,
       gfm: true,
       headerIds: false,
       mangle: false,
-      renderer: renderer,
     });
+
+    // Post-process HTML: wrap tables in scroll container + open links in new tab
+    function postProcessHTML(html) {
+      // Wrap tables in scrollable div
+      html = html.replace(/<table>/g, '<div class="table-wrapper"><table>');
+      html = html.replace(/<\/table>/g, '</table></div>');
+      // Open all links in new tab
+      html = html.replace(/<a href="/g, '<a target="_blank" rel="noopener noreferrer" href="');
+      return html;
+    }
+
+    // Override marked.parse to include post-processing
+    var originalParse = marked.parse.bind(marked);
+    marked.parse = function(text) {
+      return postProcessHTML(originalParse(text));
+    };
 
     // ─── DOM HELPERS ────────────────────────────────────────
     var messagesEl = document.getElementById("messages");
