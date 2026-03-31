@@ -362,7 +362,7 @@
 
       try {
         var recentMessages = conversationHistory.slice(-6);
-        var resp = await fetch("https://qogtgpqaqaouxhfckzsq.supabase.co/functions/v1/chat", {
+        var resp = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ messages: recentMessages }),
