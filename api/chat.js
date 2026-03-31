@@ -343,6 +343,15 @@ export default async function handler(req, res) {
     let webSearchCount = 0;
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+      // Guard against Vercel timeout (60s) - leave 5s buffer
+      const elapsed = Date.now() - startTime;
+      if (elapsed > 55000) {
+        console.warn(`[Round ${round + 1}] Approaching timeout (${elapsed}ms elapsed). Breaking with current text.`);
+        break;
+      }
+      
+      console.log(`[Round ${round + 1}] Starting. Elapsed: ${elapsed}ms`);
+      
       // Build tool_choice: force BigQuery on round 1
       let tool_choice = undefined;
       if (round === 0) {
@@ -368,6 +377,7 @@ export default async function handler(req, res) {
       try {
         response = await callClaude(body);
       } catch (err) {
+        console.error(`[Round ${round + 1}] Claude API error: ${err.message} (status: ${err.status})`);
         // Retry once on 529
         if (err.status === 529) {
           await sleep(3000);
@@ -378,11 +388,16 @@ export default async function handler(req, res) {
       }
 
       const { content, stop_reason } = response;
+      
+      // Log what Claude returned
+      const blockTypes = content.map(b => b.type).join(', ');
+      console.log(`[Round ${round + 1}] Claude returned: [${blockTypes}] stop_reason=${stop_reason}. Elapsed: ${Date.now() - startTime}ms`);
 
       // Extract text blocks from this round
       const textBlocks = content.filter((b) => b.type === 'text').map((b) => b.text);
       if (textBlocks.length > 0) {
         finalText = textBlocks.join('\n');
+        console.log(`[Round ${round + 1}] Got text: ${finalText.length} chars`);
       }
 
       // Check for tool use
@@ -390,6 +405,7 @@ export default async function handler(req, res) {
 
       // If no tool calls, we're done — Claude gave a final text response
       if (toolUseBlocks.length === 0) {
+        console.log(`[Round ${round + 1}] No tool calls, breaking.`);
         break;
       }
 
