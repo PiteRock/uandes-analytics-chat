@@ -1,371 +1,143 @@
-// api/chat.js — UAndes Analytics Chat (Vercel Serverless Function)
-// Stack: Claude API (tool-use + web search), BigQuery, ESM
-// Produces CAUSAL and OPERATIVE analysis, not descriptive.
-
+// api/chat.js — UAndes Analytics Chat (Hybrid: Vercel BQ + Supabase Claude)
 import jwt from 'jsonwebtoken';
 
 export const config = { maxDuration: 60 };
 
-// ─── CONSTANTS ──────────────────────────────────────────────────────────────
 const BQ_PROJECT = 'perfomance-490910';
 const BQ_DATASET = 'uandes_marketing';
-const MAX_BQ_ROWS = 30;
-const MAX_BQ_BYTES = 8000;
-const CLAUDE_HAIKU = 'claude-haiku-4-5-20251001';
-const CLAUDE_SONNET = 'claude-sonnet-4-20250514';
-const MAX_TOKENS = 2048;
+const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
+const SUPABASE_FN = 'https://qogtgpqaqaouxhfckzsq.supabase.co/functions/v1/analyze';
 
-// ─── BigQuery OAuth Token Cache ─────────────────────────────────────────────
 let cachedToken = null;
 let tokenExpiry = 0;
 
 async function getBQToken() {
   if (cachedToken && Date.now() < tokenExpiry - 60000) return cachedToken;
-
   const sa = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
   const now = Math.floor(Date.now() / 1000);
-  const token = jwt.sign(
-    {
-      iss: sa.client_email,
-      sub: sa.client_email,
-      aud: 'https://oauth2.googleapis.com/token',
-      iat: now,
-      exp: now + 3600,
-      scope: 'https://www.googleapis.com/auth/bigquery.readonly',
-    },
-    sa.private_key,
-    { algorithm: 'RS256' }
-  );
-
+  const token = jwt.sign({
+    iss: sa.client_email, sub: sa.client_email,
+    aud: 'https://oauth2.googleapis.com/token',
+    iat: now, exp: now + 3600,
+    scope: 'https://www.googleapis.com/auth/bigquery.readonly',
+  }, sa.private_key, { algorithm: 'RS256' });
   const resp = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${token}`,
   });
-
   const data = await resp.json();
-  if (!data.access_token) throw new Error('BQ auth failed: ' + JSON.stringify(data));
+  if (!data.access_token) throw new Error('BQ auth failed');
   cachedToken = data.access_token;
   tokenExpiry = Date.now() + data.expires_in * 1000;
   return cachedToken;
 }
 
-// ─── BigQuery Query Execution ───────────────────────────────────────────────
 async function runBigQuery(sql) {
   const token = await getBQToken();
   const resp = await fetch(
     `https://bigquery.googleapis.com/bigquery/v2/projects/${BQ_PROJECT}/queries`,
     {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        query: sql,
-        useLegacySql: false,
-        maxResults: 100,
-        timeoutMs: 30000,
-      }),
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: sql, useLegacySql: false, maxResults: 100, timeoutMs: 30000 }),
     }
   );
-
   const data = await resp.json();
   if (data.error) return `Error: ${data.error.message || JSON.stringify(data.error)}`;
-  if (!data.jobComplete) return 'Error: Query timeout after 30s';
-
+  if (!data.jobComplete) return 'Error: Query timeout';
+  if (!data.rows || data.rows.length === 0) return '0 rows returned.';
   const fields = (data.schema?.fields || []).map((f) => f.name);
-  const rows = (data.rows || []).map((r) =>
-    Object.fromEntries(fields.map((f, i) => [f, r.f[i].v]))
-  );
-
-  // Truncate rows
-  let result = rows.slice(0, MAX_BQ_ROWS);
-
-  // Format as compact text table (much smaller than JSON, no [object Object] issues)
-  const header = fields.join(' | ');
-  const dataRows = result.map((r) => fields.map((f) => r[f] ?? 'NULL').join(' | '));
-  let textResult = `${header}\n${dataRows.join('\n')}`;
-
-  // Truncate by bytes if needed
-  if (textResult.length > MAX_BQ_BYTES) {
-    const lines = textResult.split('\n');
-    while (lines.length > 2 && lines.join('\n').length > MAX_BQ_BYTES) {
-      lines.pop();
-    }
-    textResult = lines.join('\n');
-  }
-
-  return `${data.totalRows} rows total, showing ${result.length}.\n${textResult}`;
+  const rows = data.rows.map((r) => fields.map((f, i) => r.f[i]?.v ?? 'NULL').join(' | '));
+  let out = fields.join(' | ') + '\n' + rows.slice(0, 30).join('\n');
+  if (out.length > 10000) out = out.slice(0, 10000) + '\n...(truncated)';
+  return data.totalRows + ' rows.\n' + out;
 }
 
-// ─── TODAY helper ───────────────────────────────────────────────────────────
-function getToday() {
-  return new Date().toISOString().split('T')[0];
+function sysPrompt() {
+  const today = new Date().toISOString().split('T')[0];
+  return `Analista performance digital UAndes Online. Hoy: ${today}.
+Analisis CAUSAL y OPERATIVO. Datos exactos, nunca frases genericas.
+CPL decomp: CPC=SUBASTA, CTR=CREATIVIDAD, CPM=COMPETENCIA, Freq=FATIGA(>3=alerta), CVR=LANDING.
+TC(matriculados/mqls*100), CAC(spend/matriculados), ROAS(revenue/spend). JOIN campaign_id con stg_hubspot_deals_attributed.extracted_campaign_id, usar amount_in_company_currency.
+Plataforma obligatoria. Links: Google=[Ver](https://ads.google.com/aw/campaigns?campaignId={id}&ocid=4804138296) Meta=[Ver](https://adsmanager.facebook.com/adsmanager/manage/campaigns?act=598016410984327&selected_campaign_ids={id}). campaign_id en queries.
+Si N campanas, tabla top 5-8 + resumen completo N.
+BQ: \`${BQ_PROJECT}.${BQ_DATASET}.tabla\`. rpt_campaign_performance_daily: date,platform('Meta'|'Google'),campaign_id,campaign_name,diplomado,negocio,spend_with_iva,impressions,clicks,reach,leads,mqls.
+Negocios: Medicina Nuevos,Medicina Antiguos,Enfermeria,Derecho,Educacion,ICOM,ICF,ADS Medicina/Gestion ADS,ADS Educacion,CET/Gestion Inmobiliaria,UDEP (Peru),Magister,Odontologia.
+stg_hubspot_deals_attributed,FBADS_AD,GOOGLEADS_KEYWORD,GOOGLEADS_SEARCH_QUERY disponibles.
+SQL: backticks, NULLIF, platform mayuscula, periodo anterior CTEs, campaign_id en SELECT. UNA query. Espanol.`;
 }
 
-// ─── SYSTEM PROMPT ──────────────────────────────────────────────────────────
-function buildSystemPrompt() {
-  const today = getToday();
-  return `Analista de performance digital UAndes Online. Hoy: ${today}.
+const bqTool = {
+  name: 'run_bigquery_query',
+  description: 'Execute SQL against BigQuery.',
+  input_schema: { type: 'object', properties: { sql: { type: 'string' }, purpose: { type: 'string' } }, required: ['sql'] },
+};
 
-## PRINCIPIOS
-Análisis CAUSAL y OPERATIVO, nunca descriptivo. Identificar QUÉ pasa, POR QUÉ (causa raíz), QUÉ HACER (acción concreta).
-NUNCA frases genéricas ("alta competencia", "saturación"). SIEMPRE datos exactos.
-
-## DESCOMPOSICIÓN CPL (obligatoria)
-| Métrica | Fórmula | Diagnostica |
-|---------|---------|-------------|
-| CPC | spend/clicks | SUBASTA |
-| CTR | clicks/imp×100 | CREATIVIDAD |
-| CPM | (spend/imp)×1000 | COMPETENCIA |
-| Freq | imp/reach | FATIGA (>3=alerta) |
-| CVR | leads/clicks×100 | LANDING PAGE |
-| MQL Rate | mqls/leads×100 | CALIFICACIÓN |
-
-## MÉTRICAS DE NEGOCIO (para ventas/metas/rendimiento)
-| Métrica | Fórmula | Mide |
-|---------|---------|------|
-| TC | matriculados/mqls×100 | Eficiencia comercial |
-| CAC | spend/matriculados | Costo adquisición |
-| ROAS | revenue/spend | Retorno inversión |
-
-Para TC/CAC: cruzar rpt_campaign_performance_daily.campaign_id con stg_hubspot_deals_attributed.extracted_campaign_id. Usar amount_in_company_currency (NO amount) para revenue en CLP. UDEP tiene montos PEN mal etiquetados como CLP.
-
-## REGLAS DE OUTPUT
-- Columna "Plataforma" obligatoria en TODA tabla
-- En texto: siempre "(Meta)" o "(Google)" tras nombre campaña
-- Primera vez que uses sigla, definir: CPC=Costo Por Click, CTR=Click-Through Rate, CVR=Tasa Conversión a Lead, TC=Tasa Conversión comercial, CAC=Costo Adquisición, ROAS=Return on Ad Spend
-- COMPLETITUD: Si dices "N campañas", mostrar tabla detallada top 5-8 + tabla resumen COMPLETA de las N con: Campaña|Plataforma|Gasto|CPL|Diagnóstico|Link
-- Links: Google=[Ver](https://ads.google.com/aw/campaigns?campaignId={id}&ocid=4804138296) Meta=[Ver](https://adsmanager.facebook.com/adsmanager/manage/campaigns?act=598016410984327&selected_campaign_ids={id})
-- SIEMPRE incluir campaign_id en queries para generar links
-- Severidad: 🔴 crítico, 🟡 atención, 🟢 OK
-
-## DIAGNÓSTICO CAUSAL
-CPL↑+CPC↑+CTR estable→SUBASTA | CPL↑+CTR↓→CREATIVIDAD | CPL↑+CVR↓→LANDING | Freq>3→FATIGA | CPM↑→COMPETENCIA
-
-## ACCIONES: campaña específica + condición + verbo imperativo + motivo + prioridad
-
-## BigQuery
-Proyecto: \`${BQ_PROJECT}\`, Dataset: \`${BQ_DATASET}\`
-
-### rpt_campaign_performance_daily (principal)
-date(DATE), platform('Meta'|'Google'), campaign_id, campaign_name, diplomado, negocio, spend_with_iva(FLOAT64), impressions(INT64), clicks(INT64), reach(INT64), leads(INT64), mqls(INT64), cpl_with_iva, cpl_status
-Negocios: Medicina Nuevos, Medicina Antiguos, Enfermería, Derecho, Educación, ICOM, ICF, ADS Medicina/Gestion ADS, ADS Educación, CET/Gestion Inmobiliaria, UDEP (Peru), Magister, Odontologia (+NULL)
-
-### stg_hubspot_deals_attributed (deals/matriculados)
-extracted_campaign_id(JOIN key), amount_in_company_currency(CLP normalizado), detected_platform, diplomado, diplomado_negocio, close_date_only(DATE)
-
-### FBADS_AD: DATE, CAMPAIGN_NAME, COST, CLICKS, IMPRESSIONS, REACH, LANDING_PAGE_VIEWS, OFFSITE_CONVERSIONS_FB_PIXEL_LEAD
-### GOOGLEADS_KEYWORD: DATE, CAMPAIGN_NAME, KEYWORD, MATCH_TYPE, QUALITY_SCORE, CLICKS, IMPRESSIONS, COST
-### GOOGLEADS_SEARCH_QUERY: DATE, CAMPAIGN_NAME, SEARCH_TERM, CLICKS, IMPRESSIONS, CONVERSIONS, COST
-
-## SQL: backticks \`${BQ_PROJECT}.${BQ_DATASET}.tabla\`, NULLIF divisiones, platform con mayúscula, SIEMPRE período anterior para variaciones, SIEMPRE campaign_id en SELECT
-
-## HERRAMIENTAS
-1. SIEMPRE ejecutar BigQuery antes de responder
-2. **CRÍTICO: Hacer UNA SOLA query que traiga TODA la data necesaria (periodo actual + anterior en la misma query con CTEs). NUNCA hacer queries secuenciales. Tienes max 60s total.**
-3. Preguntas ventas/metas/TC/CAC → query funnel con stg_hubspot_deals_attributed
-4. Responder en español
-5. Después de recibir los datos, responder INMEDIATAMENTE con el análisis. NO pedir más datos.
-
-## NUNCA
-❌ Frases vagas ❌ Sin datos ❌ Acciones genéricas ❌ Omitir plataforma ❌ Omitir campañas ❌ Ignorar TC/CAC en ventas ❌ Hacer múltiples queries secuenciales (usar CTEs)`;
-}
-
-// ─── TOOL DEFINITIONS ───────────────────────────────────────────────────────
-const customTools = [
-  {
-    name: 'run_bigquery_query',
-    description:
-      'Execute a SQL query against BigQuery to get campaign performance data. ALWAYS use this tool before answering data questions. Returns rows as JSON.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        sql: {
-          type: 'string',
-          description:
-            'GoogleSQL query. Use backtick-quoted table references: `perfomance-490910.uandes_marketing.table_name`',
-        },
-        purpose: {
-          type: 'string',
-          description: 'Brief description of what this query will answer',
-        },
-      },
-      required: ['sql', 'purpose'],
-    },
-  },
-];
-
-// ─── MAIN HANDLER ───────────────────────────────────────────────────────────
-export default async function handler(req, res) {
-  // CORS
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-API-Key');
-  if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
-
-  const startTime = Date.now();
-
-  try {
-    const { messages: userMessages } = req.body;
-    if (!userMessages || !Array.isArray(userMessages) || userMessages.length === 0) {
-      return res.status(400).json({ error: 'messages array required' });
-    }
-
-    // Limit history to last 4 messages
-    const recentMessages = userMessages.slice(-4).map((m) => ({
-      role: m.role,
-      content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
-    }));
-
-    const systemPrompt = buildSystemPrompt();
-
-    // Tool-use loop: Round 1 = forced BQ query, Round 2 = text response (no tools)
-    let messages = [...recentMessages];
-    let finalText = '';
-
-    // ─── ROUND 1: Force BigQuery query ───────────────────────
-    console.log(`[Round 1] Starting. Elapsed: ${Date.now() - startTime}ms`);
-    
-    const round1Body = {
-      model: CLAUDE_HAIKU,
-      max_tokens: 1024,
-      system: systemPrompt,
-      messages,
-      tools: customTools,
-      tool_choice: { type: 'tool', name: 'run_bigquery_query' },
-    };
-
-    let round1Response;
-    try {
-      round1Response = await callClaude(round1Body);
-    } catch (err) {
-      if (err.status === 529) {
-        await sleep(3000);
-        round1Response = await callClaude(round1Body);
-      } else {
-        throw err;
-      }
-    }
-
-    const toolUseBlock = round1Response.content.find((b) => b.type === 'tool_use');
-    if (!toolUseBlock) {
-      // Claude didn't use the tool — extract any text
-      finalText = round1Response.content
-        .filter((b) => b.type === 'text')
-        .map((b) => b.text)
-        .join('\n') || 'No se pudo generar la consulta. Intenta de nuevo.';
-    } else {
-      // Execute BQ query
-      let bqResult;
-      try {
-        console.log(`[BQ] ${toolUseBlock.input.purpose || 'query'}`);
-        bqResult = await runBigQuery(toolUseBlock.input.sql);
-      } catch (err) {
-        console.error(`[BQ Error] ${err.message}`);
-        bqResult = `Error: ${err.message}`;
-      }
-
-      console.log(`[Round 1] BQ done. Elapsed: ${Date.now() - startTime}ms`);
-
-      // ─── ROUND 2: Get text response with data (NO tools) ───
-      messages.push({ role: 'assistant', content: round1Response.content });
-      messages.push({
-        role: 'user',
-        content: [
-          {
-            type: 'tool_result',
-            tool_use_id: toolUseBlock.id,
-            content: String(bqResult),
-          },
-        ],
-      });
-
-      console.log(`[Round 2] Starting. Elapsed: ${Date.now() - startTime}ms`);
-
-      const round2Body = {
-        model: CLAUDE_SONNET,
-        max_tokens: MAX_TOKENS,
-        system: systemPrompt,
-        messages,
-        // NO tools = Claude MUST respond with text only
-      };
-
-      let round2Response;
-      try {
-        round2Response = await callClaude(round2Body);
-      } catch (err) {
-        if (err.status === 529) {
-          await sleep(3000);
-          round2Response = await callClaude(round2Body);
-        } else {
-          // If Claude fails, return the raw data as fallback
-          console.error(`[Round 2] Claude error: ${err.message}`);
-          finalText = `Error al generar análisis. Datos crudos de BigQuery:\n\n\`\`\`\n${String(bqResult).slice(0, 2000)}\n\`\`\``;
-          round2Response = null;
-        }
-      }
-
-      if (round2Response) {
-        const textBlocks = round2Response.content.filter((b) => b.type === 'text');
-        finalText = textBlocks.map((b) => b.text).join('\n');
-      }
-
-      console.log(`[Round 2] Done. Text: ${finalText.length} chars. Elapsed: ${Date.now() - startTime}ms`);
-    }
-
-    const responseTime = Date.now() - startTime;
-
-    // Fallback if no text was generated
-    if (!finalText || finalText.trim() === '') {
-      console.error(`[Chat] No text generated. Response time: ${responseTime}ms`);
-      finalText = 'Error: No se pudo generar una respuesta. Por favor intenta de nuevo.';
-    }
-
-    console.log(`[Chat] Response generated in ${responseTime}ms, length: ${finalText.length}`);
-
-    // Return JSON response
-    return res.status(200).json({
-      response: finalText,
-      response_time_ms: responseTime,
-    });
-  } catch (err) {
-    console.error('Chat error:', err);
-    const status = err.status || 500;
-    return res.status(status).json({
-      error: err.message || 'Internal server error',
-      response_time_ms: Date.now() - startTime,
-    });
-  }
-}
-
-// ─── Claude API Call ────────────────────────────────────────────────────────
 async function callClaude(body) {
   const resp = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': process.env.ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01',
-    },
+    headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
     body: JSON.stringify(body),
   });
-
   if (!resp.ok) {
-    const err = new Error(`Claude API error: ${resp.status}`);
+    const err = new Error(`Claude ${resp.status}`);
     err.status = resp.status;
-    try {
-      const errBody = await resp.json();
-      err.message = errBody.error?.message || err.message;
-    } catch {}
+    try { const e = await resp.json(); err.message = e.error?.message || err.message; } catch {}
     throw err;
   }
-
   return resp.json();
 }
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
+export default async function handler(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+
+  const t0 = Date.now();
+  try {
+    const { messages: um } = req.body;
+    if (!um?.length) return res.status(400).json({ error: 'messages required' });
+
+    const userQ = um[um.length - 1]?.content || '';
+    const msgs = um.slice(-4).map((m) => ({
+      role: m.role, content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+    }));
+
+    // STEP 1: Claude generates SQL (~5s)
+    console.log('[S1] SQL gen...');
+    const r1 = await callClaude({
+      model: CLAUDE_MODEL, max_tokens: 1024, system: sysPrompt(),
+      messages: msgs, tools: [bqTool],
+      tool_choice: { type: 'tool', name: 'run_bigquery_query' },
+    });
+    const tb = r1.content.find((b) => b.type === 'tool_use');
+    if (!tb) return res.status(200).json({ response: 'No se pudo generar consulta.', response_time_ms: Date.now() - t0 });
+    console.log(`[S1] Done ${Date.now()-t0}ms`);
+
+    // STEP 2: Execute BQ (~3s) - works in Vercel
+    console.log('[S2] BQ...');
+    let bqData;
+    try { bqData = await runBigQuery(tb.input.sql); } catch (e) { bqData = 'Error: ' + e.message; }
+    console.log(`[S2] Done ${Date.now()-t0}ms len=${bqData.length}`);
+
+    // STEP 3: Send to Supabase Edge Function for Claude analysis (150s timeout!)
+    console.log('[S3] Supabase analyze...');
+    const aResp = await fetch(SUPABASE_FN, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: userQ, bqData }),
+    });
+    const aData = await aResp.json();
+    console.log(`[S3] Done ${Date.now()-t0}ms`);
+
+    return res.status(200).json({
+      response: aData.response || aData.error || 'Sin respuesta.',
+      response_time_ms: Date.now() - t0,
+    });
+  } catch (err) {
+    console.error('Error:', err.message);
+    return res.status(err.status || 500).json({ error: err.message, response_time_ms: Date.now() - t0 });
+  }
 }
