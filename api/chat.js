@@ -9,10 +9,8 @@ export const config = { maxDuration: 60 };
 // ─── CONSTANTS ──────────────────────────────────────────────────────────────
 const BQ_PROJECT = 'perfomance-490910';
 const BQ_DATASET = 'uandes_marketing';
-const MAX_TOOL_ROUNDS = 3;
 const MAX_BQ_ROWS = 50;
 const MAX_BQ_BYTES = 15000;
-const MAX_WEB_SEARCHES = 2;
 const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
 const MAX_TOKENS = 3000;
 
@@ -199,13 +197,6 @@ const customTools = [
   },
 ];
 
-// Web search is a built-in Anthropic tool with its own format
-const webSearchTool = {
-  type: 'web_search_20250305',
-  name: 'web_search',
-  max_uses: MAX_WEB_SEARCHES,
-};
-
 // ─── MAIN HANDLER ───────────────────────────────────────────────────────────
 export default async function handler(req, res) {
   // CORS
@@ -231,116 +222,93 @@ export default async function handler(req, res) {
 
     const systemPrompt = buildSystemPrompt();
 
-    // Tool-use loop
+    // Tool-use loop: Round 1 = forced BQ query, Round 2 = text response (no tools)
     let messages = [...recentMessages];
     let finalText = '';
-    let webSearchCount = 0;
 
-    for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-      // Guard against Vercel timeout (60s) - leave 8s buffer
-      const elapsed = Date.now() - startTime;
-      if (elapsed > 52000) {
-        console.warn(`[Round ${round + 1}] Approaching timeout (${elapsed}ms). Breaking.`);
-        break;
+    // ─── ROUND 1: Force BigQuery query ───────────────────────
+    console.log(`[Round 1] Starting. Elapsed: ${Date.now() - startTime}ms`);
+    
+    const round1Body = {
+      model: CLAUDE_MODEL,
+      max_tokens: 1024,
+      system: systemPrompt,
+      messages,
+      tools: customTools,
+      tool_choice: { type: 'tool', name: 'run_bigquery_query' },
+    };
+
+    let round1Response;
+    try {
+      round1Response = await callClaude(round1Body);
+    } catch (err) {
+      if (err.status === 529) {
+        await sleep(3000);
+        round1Response = await callClaude(round1Body);
+      } else {
+        throw err;
       }
-      
-      console.log(`[Round ${round + 1}] Starting. Elapsed: ${elapsed}ms`);
-      
-      // Build tool_choice: force BigQuery on round 1
-      let tool_choice = undefined;
-      if (round === 0) {
-        tool_choice = { type: 'tool', name: 'run_bigquery_query' };
+    }
+
+    const toolUseBlock = round1Response.content.find((b) => b.type === 'tool_use');
+    if (!toolUseBlock) {
+      // Claude didn't use the tool — extract any text
+      finalText = round1Response.content
+        .filter((b) => b.type === 'text')
+        .map((b) => b.text)
+        .join('\n') || 'No se pudo generar la consulta. Intenta de nuevo.';
+    } else {
+      // Execute BQ query
+      let bqResult;
+      try {
+        console.log(`[BQ] ${toolUseBlock.input.purpose || 'query'}`);
+        bqResult = await runBigQuery(toolUseBlock.input.sql);
+      } catch (err) {
+        console.error(`[BQ Error] ${err.message}`);
+        bqResult = `Error: ${err.message}`;
       }
 
-      // Build tools array: custom + web search (if not exhausted)
-      const availableTools = [...customTools];
-      if (webSearchCount < MAX_WEB_SEARCHES) {
-        availableTools.push(webSearchTool);
-      }
+      console.log(`[Round 1] BQ done. Elapsed: ${Date.now() - startTime}ms`);
 
-      const body = {
+      // ─── ROUND 2: Get text response with data (NO tools) ───
+      messages.push({ role: 'assistant', content: round1Response.content });
+      messages.push({
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: toolUseBlock.id,
+            content: String(bqResult),
+          },
+        ],
+      });
+
+      console.log(`[Round 2] Starting. Elapsed: ${Date.now() - startTime}ms`);
+
+      const round2Body = {
         model: CLAUDE_MODEL,
         max_tokens: MAX_TOKENS,
         system: systemPrompt,
         messages,
-        tools: availableTools,
+        // NO tools = Claude MUST respond with text only
       };
-      if (tool_choice) body.tool_choice = tool_choice;
 
-      let response;
+      let round2Response;
       try {
-        response = await callClaude(body);
+        round2Response = await callClaude(round2Body);
       } catch (err) {
-        console.error(`[Round ${round + 1}] Claude API error: ${err.message} (status: ${err.status})`);
-        // Retry once on 529
         if (err.status === 529) {
           await sleep(3000);
-          response = await callClaude(body);
+          round2Response = await callClaude(round2Body);
         } else {
           throw err;
         }
       }
 
-      const { content, stop_reason } = response;
-      
-      // Log what Claude returned
-      const blockTypes = content.map(b => b.type).join(', ');
-      console.log(`[Round ${round + 1}] Claude returned: [${blockTypes}] stop_reason=${stop_reason}. Elapsed: ${Date.now() - startTime}ms`);
+      const textBlocks = round2Response.content.filter((b) => b.type === 'text');
+      finalText = textBlocks.map((b) => b.text).join('\n');
 
-      // Extract text blocks from this round
-      const textBlocks = content.filter((b) => b.type === 'text').map((b) => b.text);
-      if (textBlocks.length > 0) {
-        finalText = textBlocks.join('\n');
-        console.log(`[Round ${round + 1}] Got text: ${finalText.length} chars`);
-      }
-
-      // Check for tool use
-      const toolUseBlocks = content.filter((b) => b.type === 'tool_use');
-
-      // If no tool calls, we're done — Claude gave a final text response
-      if (toolUseBlocks.length === 0) {
-        console.log(`[Round ${round + 1}] No tool calls, breaking.`);
-        break;
-      }
-
-      // If stop_reason is end_turn but there ARE tool blocks,
-      // we still need to process them (Claude sometimes mixes text + tool_use)
-      // But if stop_reason is end_turn with no tool_use, we already broke above.
-
-      // Process tool calls
-      messages.push({ role: 'assistant', content });
-
-      const toolResults = [];
-      for (const toolCall of toolUseBlocks) {
-        let result;
-
-        if (toolCall.name === 'run_bigquery_query') {
-          try {
-            console.log(`[BQ Round ${round + 1}] ${toolCall.input.purpose || 'query'}`);
-            result = await runBigQuery(toolCall.input.sql);
-          } catch (err) {
-            console.error(`[BQ Error] ${err.message}`);
-            result = `Error: ${err.message}`;
-          }
-        } else {
-          result = `Error: Unknown tool ${toolCall.name}`;
-        }
-
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: toolCall.id,
-          content: result,
-        });
-      }
-
-      if (toolResults.length > 0) {
-        messages.push({ role: 'user', content: toolResults });
-      }
-
-      // If this was end_turn, don't do another round
-      if (stop_reason === 'end_turn') {
-        break;
-      }
+      console.log(`[Round 2] Done. Text: ${finalText.length} chars. Elapsed: ${Date.now() - startTime}ms`);
     }
 
     const responseTime = Date.now() - startTime;
