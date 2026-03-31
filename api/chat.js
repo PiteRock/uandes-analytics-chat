@@ -282,7 +282,7 @@ ORDER BY gasto DESC
 }
 
 // ─── TOOL DEFINITIONS ───────────────────────────────────────────────────────
-const tools = [
+const customTools = [
   {
     name: 'run_bigquery_query',
     description:
@@ -303,12 +303,14 @@ const tools = [
       required: ['sql', 'purpose'],
     },
   },
-  {
-    type: 'web_search_20250305',
-    name: 'web_search',
-    max_uses: MAX_WEB_SEARCHES,
-  },
 ];
+
+// Web search is a built-in Anthropic tool with its own format
+const webSearchTool = {
+  type: 'web_search_20250305',
+  name: 'web_search',
+  max_uses: MAX_WEB_SEARCHES,
+};
 
 // ─── MAIN HANDLER ───────────────────────────────────────────────────────────
 export default async function handler(req, res) {
@@ -347,11 +349,11 @@ export default async function handler(req, res) {
         tool_choice = { type: 'tool', name: 'run_bigquery_query' };
       }
 
-      // Filter web_search if exhausted
-      const availableTools = tools.filter((t) => {
-        if (t.name === 'web_search' && webSearchCount >= MAX_WEB_SEARCHES) return false;
-        return true;
-      });
+      // Build tools array: custom + web search (if not exhausted)
+      const availableTools = [...customTools];
+      if (webSearchCount < MAX_WEB_SEARCHES) {
+        availableTools.push(webSearchTool);
+      }
 
       const body = {
         model: CLAUDE_MODEL,
@@ -377,17 +379,23 @@ export default async function handler(req, res) {
 
       const { content, stop_reason } = response;
 
-      // Extract text blocks
+      // Extract text blocks from this round
       const textBlocks = content.filter((b) => b.type === 'text').map((b) => b.text);
-      finalText = textBlocks.join('\n');
+      if (textBlocks.length > 0) {
+        finalText = textBlocks.join('\n');
+      }
 
       // Check for tool use
       const toolUseBlocks = content.filter((b) => b.type === 'tool_use');
 
-      if (toolUseBlocks.length === 0 || stop_reason === 'end_turn') {
-        // No more tools, we're done
+      // If no tool calls, we're done — Claude gave a final text response
+      if (toolUseBlocks.length === 0) {
         break;
       }
+
+      // If stop_reason is end_turn but there ARE tool blocks,
+      // we still need to process them (Claude sometimes mixes text + tool_use)
+      // But if stop_reason is end_turn with no tool_use, we already broke above.
 
       // Process tool calls
       messages.push({ role: 'assistant', content });
@@ -398,15 +406,13 @@ export default async function handler(req, res) {
 
         if (toolCall.name === 'run_bigquery_query') {
           try {
+            console.log(`[BQ Round ${round + 1}] ${toolCall.input.purpose || 'query'}`);
             const bqResult = await runBigQuery(toolCall.input.sql);
             result = JSON.stringify(bqResult);
           } catch (err) {
+            console.error(`[BQ Error] ${err.message}`);
             result = JSON.stringify({ error: err.message });
           }
-        } else if (toolCall.name === 'web_search') {
-          webSearchCount++;
-          // web_search is handled by Claude API natively, skip manual processing
-          continue;
         } else {
           result = JSON.stringify({ error: `Unknown tool: ${toolCall.name}` });
         }
@@ -421,9 +427,22 @@ export default async function handler(req, res) {
       if (toolResults.length > 0) {
         messages.push({ role: 'user', content: toolResults });
       }
+
+      // If this was end_turn, don't do another round
+      if (stop_reason === 'end_turn') {
+        break;
+      }
     }
 
     const responseTime = Date.now() - startTime;
+
+    // Fallback if no text was generated
+    if (!finalText || finalText.trim() === '') {
+      console.error(`[Chat] No text generated after ${MAX_TOOL_ROUNDS} rounds. Response time: ${responseTime}ms`);
+      finalText = 'Error: No se pudo generar una respuesta. Por favor intenta de nuevo.';
+    }
+
+    console.log(`[Chat] Response generated in ${responseTime}ms, length: ${finalText.length}`);
 
     // Return JSON response
     return res.status(200).json({
