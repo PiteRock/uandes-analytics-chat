@@ -9,12 +9,12 @@ export const config = { maxDuration: 60 };
 // ─── CONSTANTS ──────────────────────────────────────────────────────────────
 const BQ_PROJECT = 'perfomance-490910';
 const BQ_DATASET = 'uandes_marketing';
-const MAX_TOOL_ROUNDS = 5;
+const MAX_TOOL_ROUNDS = 3;
 const MAX_BQ_ROWS = 50;
-const MAX_BQ_BYTES = 20000;
-const MAX_WEB_SEARCHES = 3;
+const MAX_BQ_BYTES = 15000;
+const MAX_WEB_SEARCHES = 2;
 const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
-const MAX_TOKENS = 4096;
+const MAX_TOKENS = 3000;
 
 // ─── BigQuery OAuth Token Cache ─────────────────────────────────────────────
 let cachedToken = null;
@@ -165,12 +165,14 @@ extracted_campaign_id(JOIN key), amount_in_company_currency(CLP normalizado), de
 
 ## HERRAMIENTAS
 1. SIEMPRE ejecutar BigQuery antes de responder
-2. Preguntas ventas/metas/TC/CAC → query funnel con stg_hubspot_deals_attributed
-3. Web search solo para contexto mercado. Max ${MAX_WEB_SEARCHES}
-4. Responder en español
+2. **CRÍTICO: Hacer UNA SOLA query que traiga TODA la data necesaria (periodo actual + anterior en la misma query con CTEs). NUNCA hacer queries secuenciales. Tienes max 60s total.**
+3. Preguntas ventas/metas/TC/CAC → query funnel con stg_hubspot_deals_attributed
+4. Web search solo para contexto mercado. Max ${MAX_WEB_SEARCHES}
+5. Responder en español
+6. Después de recibir los datos, responder INMEDIATAMENTE con el análisis. NO pedir más datos.
 
 ## NUNCA
-❌ Frases vagas ❌ Sin datos ❌ Acciones genéricas ❌ Omitir plataforma ❌ Omitir campañas de la tabla ❌ Ignorar TC/CAC en preguntas de ventas`;
+❌ Frases vagas ❌ Sin datos ❌ Acciones genéricas ❌ Omitir plataforma ❌ Omitir campañas ❌ Ignorar TC/CAC en ventas ❌ Hacer múltiples queries secuenciales (usar CTEs)`;
 }
 
 // ─── TOOL DEFINITIONS ───────────────────────────────────────────────────────
@@ -235,10 +237,10 @@ export default async function handler(req, res) {
     let webSearchCount = 0;
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-      // Guard against Vercel timeout (60s) - leave 5s buffer
+      // Guard against Vercel timeout (60s) - leave 8s buffer
       const elapsed = Date.now() - startTime;
-      if (elapsed > 55000) {
-        console.warn(`[Round ${round + 1}] Approaching timeout (${elapsed}ms elapsed). Breaking with current text.`);
+      if (elapsed > 52000) {
+        console.warn(`[Round ${round + 1}] Approaching timeout (${elapsed}ms). Breaking.`);
         break;
       }
       
