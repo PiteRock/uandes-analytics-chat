@@ -11,7 +11,8 @@ const BQ_PROJECT = 'perfomance-490910';
 const BQ_DATASET = 'uandes_marketing';
 const MAX_BQ_ROWS = 30;
 const MAX_BQ_BYTES = 8000;
-const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
+const CLAUDE_HAIKU = 'claude-haiku-4-5-20251001';
+const CLAUDE_SONNET = 'claude-sonnet-4-20250514';
 const MAX_TOKENS = 2048;
 
 // ─── BigQuery OAuth Token Cache ─────────────────────────────────────────────
@@ -229,7 +230,7 @@ export default async function handler(req, res) {
     console.log(`[Round 1] Starting. Elapsed: ${Date.now() - startTime}ms`);
     
     const round1Body = {
-      model: CLAUDE_MODEL,
+      model: CLAUDE_HAIKU,
       max_tokens: 1024,
       system: systemPrompt,
       messages,
@@ -285,7 +286,7 @@ export default async function handler(req, res) {
       console.log(`[Round 2] Starting. Elapsed: ${Date.now() - startTime}ms`);
 
       const round2Body = {
-        model: CLAUDE_MODEL,
+        model: CLAUDE_SONNET,
         max_tokens: MAX_TOKENS,
         system: systemPrompt,
         messages,
