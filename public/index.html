@@ -1,466 +1,365 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>UAndes Analytics</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <style>
-    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+// api/chat.js — UAndes Analytics Chat (Vercel Serverless Function)
+// Stack: Claude API (tool-use + web search), BigQuery, ESM
+// Produces CAUSAL and OPERATIVE analysis, not descriptive.
 
-    :root {
-      --bg-primary: #0f0f0f;
-      --bg-secondary: #1a1a1a;
-      --bg-tertiary: #242424;
-      --bg-hover: #2a2a2a;
-      --text-primary: #e8e8e8;
-      --text-secondary: #999;
-      --text-muted: #666;
-      --accent: #E8833A;
-      --accent-dim: rgba(232, 131, 58, 0.15);
-      --accent-hover: #f0933f;
-      --border: #2a2a2a;
-      --border-light: #333;
-      --success: #34d399;
-      --error: #f87171;
-      --radius: 12px;
-      --radius-sm: 8px;
-      --font: 'DM Sans', -apple-system, sans-serif;
-      --mono: 'JetBrains Mono', monospace;
+import jwt from 'jsonwebtoken';
+
+export const config = { maxDuration: 60 };
+
+// ─── CONSTANTS ──────────────────────────────────────────────────────────────
+const BQ_PROJECT = 'perfomance-490910';
+const BQ_DATASET = 'uandes_marketing';
+const MAX_BQ_ROWS = 50;
+const MAX_BQ_BYTES = 15000;
+const CLAUDE_MODEL = 'claude-sonnet-4-20250514';
+const MAX_TOKENS = 3000;
+
+// ─── BigQuery OAuth Token Cache ─────────────────────────────────────────────
+let cachedToken = null;
+let tokenExpiry = 0;
+
+async function getBQToken() {
+  if (cachedToken && Date.now() < tokenExpiry - 60000) return cachedToken;
+
+  const sa = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
+  const now = Math.floor(Date.now() / 1000);
+  const token = jwt.sign(
+    {
+      iss: sa.client_email,
+      sub: sa.client_email,
+      aud: 'https://oauth2.googleapis.com/token',
+      iat: now,
+      exp: now + 3600,
+      scope: 'https://www.googleapis.com/auth/bigquery.readonly',
+    },
+    sa.private_key,
+    { algorithm: 'RS256' }
+  );
+
+  const resp = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${token}`,
+  });
+
+  const data = await resp.json();
+  if (!data.access_token) throw new Error('BQ auth failed: ' + JSON.stringify(data));
+  cachedToken = data.access_token;
+  tokenExpiry = Date.now() + data.expires_in * 1000;
+  return cachedToken;
+}
+
+// ─── BigQuery Query Execution ───────────────────────────────────────────────
+async function runBigQuery(sql) {
+  const token = await getBQToken();
+  const resp = await fetch(
+    `https://bigquery.googleapis.com/bigquery/v2/projects/${BQ_PROJECT}/queries`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        query: sql,
+        useLegacySql: false,
+        maxResults: 100,
+        timeoutMs: 30000,
+      }),
+    }
+  );
+
+  const data = await resp.json();
+  if (data.error) return `Error: ${data.error.message || JSON.stringify(data.error)}`;
+  if (!data.jobComplete) return 'Error: Query timeout after 30s';
+
+  const fields = (data.schema?.fields || []).map((f) => f.name);
+  const rows = (data.rows || []).map((r) =>
+    Object.fromEntries(fields.map((f, i) => [f, r.f[i].v]))
+  );
+
+  // Truncate rows
+  let result = rows.slice(0, MAX_BQ_ROWS);
+
+  // Format as compact text table (much smaller than JSON, no [object Object] issues)
+  const header = fields.join(' | ');
+  const dataRows = result.map((r) => fields.map((f) => r[f] ?? 'NULL').join(' | '));
+  let textResult = `${header}\n${dataRows.join('\n')}`;
+
+  // Truncate by bytes if needed
+  if (textResult.length > MAX_BQ_BYTES) {
+    const lines = textResult.split('\n');
+    while (lines.length > 2 && lines.join('\n').length > MAX_BQ_BYTES) {
+      lines.pop();
+    }
+    textResult = lines.join('\n');
+  }
+
+  return `${data.totalRows} rows total, showing ${result.length}.\n${textResult}`;
+}
+
+// ─── TODAY helper ───────────────────────────────────────────────────────────
+function getToday() {
+  return new Date().toISOString().split('T')[0];
+}
+
+// ─── SYSTEM PROMPT ──────────────────────────────────────────────────────────
+function buildSystemPrompt() {
+  const today = getToday();
+  return `Analista de performance digital UAndes Online. Hoy: ${today}.
+
+## PRINCIPIOS
+Análisis CAUSAL y OPERATIVO, nunca descriptivo. Identificar QUÉ pasa, POR QUÉ (causa raíz), QUÉ HACER (acción concreta).
+NUNCA frases genéricas ("alta competencia", "saturación"). SIEMPRE datos exactos.
+
+## DESCOMPOSICIÓN CPL (obligatoria)
+| Métrica | Fórmula | Diagnostica |
+|---------|---------|-------------|
+| CPC | spend/clicks | SUBASTA |
+| CTR | clicks/imp×100 | CREATIVIDAD |
+| CPM | (spend/imp)×1000 | COMPETENCIA |
+| Freq | imp/reach | FATIGA (>3=alerta) |
+| CVR | leads/clicks×100 | LANDING PAGE |
+| MQL Rate | mqls/leads×100 | CALIFICACIÓN |
+
+## MÉTRICAS DE NEGOCIO (para ventas/metas/rendimiento)
+| Métrica | Fórmula | Mide |
+|---------|---------|------|
+| TC | matriculados/mqls×100 | Eficiencia comercial |
+| CAC | spend/matriculados | Costo adquisición |
+| ROAS | revenue/spend | Retorno inversión |
+
+Para TC/CAC: cruzar rpt_campaign_performance_daily.campaign_id con stg_hubspot_deals_attributed.extracted_campaign_id. Usar amount_in_company_currency (NO amount) para revenue en CLP. UDEP tiene montos PEN mal etiquetados como CLP.
+
+## REGLAS DE OUTPUT
+- Columna "Plataforma" obligatoria en TODA tabla
+- En texto: siempre "(Meta)" o "(Google)" tras nombre campaña
+- Primera vez que uses sigla, definir: CPC=Costo Por Click, CTR=Click-Through Rate, CVR=Tasa Conversión a Lead, TC=Tasa Conversión comercial, CAC=Costo Adquisición, ROAS=Return on Ad Spend
+- COMPLETITUD: Si dices "N campañas", mostrar tabla detallada top 5-8 + tabla resumen COMPLETA de las N con: Campaña|Plataforma|Gasto|CPL|Diagnóstico|Link
+- Links: Google=[Ver](https://ads.google.com/aw/campaigns?campaignId={id}&ocid=4804138296) Meta=[Ver](https://adsmanager.facebook.com/adsmanager/manage/campaigns?act=598016410984327&selected_campaign_ids={id})
+- SIEMPRE incluir campaign_id en queries para generar links
+- Severidad: 🔴 crítico, 🟡 atención, 🟢 OK
+
+## DIAGNÓSTICO CAUSAL
+CPL↑+CPC↑+CTR estable→SUBASTA | CPL↑+CTR↓→CREATIVIDAD | CPL↑+CVR↓→LANDING | Freq>3→FATIGA | CPM↑→COMPETENCIA
+
+## ACCIONES: campaña específica + condición + verbo imperativo + motivo + prioridad
+
+## BigQuery
+Proyecto: \`${BQ_PROJECT}\`, Dataset: \`${BQ_DATASET}\`
+
+### rpt_campaign_performance_daily (principal)
+date(DATE), platform('Meta'|'Google'), campaign_id, campaign_name, diplomado, negocio, spend_with_iva(FLOAT64), impressions(INT64), clicks(INT64), reach(INT64), leads(INT64), mqls(INT64), cpl_with_iva, cpl_status
+Negocios: Medicina Nuevos, Medicina Antiguos, Enfermería, Derecho, Educación, ICOM, ICF, ADS Medicina/Gestion ADS, ADS Educación, CET/Gestion Inmobiliaria, UDEP (Peru), Magister, Odontologia (+NULL)
+
+### stg_hubspot_deals_attributed (deals/matriculados)
+extracted_campaign_id(JOIN key), amount_in_company_currency(CLP normalizado), detected_platform, diplomado, diplomado_negocio, close_date_only(DATE)
+
+### FBADS_AD: DATE, CAMPAIGN_NAME, COST, CLICKS, IMPRESSIONS, REACH, LANDING_PAGE_VIEWS, OFFSITE_CONVERSIONS_FB_PIXEL_LEAD
+### GOOGLEADS_KEYWORD: DATE, CAMPAIGN_NAME, KEYWORD, MATCH_TYPE, QUALITY_SCORE, CLICKS, IMPRESSIONS, COST
+### GOOGLEADS_SEARCH_QUERY: DATE, CAMPAIGN_NAME, SEARCH_TERM, CLICKS, IMPRESSIONS, CONVERSIONS, COST
+
+## SQL: backticks \`${BQ_PROJECT}.${BQ_DATASET}.tabla\`, NULLIF divisiones, platform con mayúscula, SIEMPRE período anterior para variaciones, SIEMPRE campaign_id en SELECT
+
+## HERRAMIENTAS
+1. SIEMPRE ejecutar BigQuery antes de responder
+2. **CRÍTICO: Hacer UNA SOLA query que traiga TODA la data necesaria (periodo actual + anterior en la misma query con CTEs). NUNCA hacer queries secuenciales. Tienes max 60s total.**
+3. Preguntas ventas/metas/TC/CAC → query funnel con stg_hubspot_deals_attributed
+4. Responder en español
+5. Después de recibir los datos, responder INMEDIATAMENTE con el análisis. NO pedir más datos.
+
+## NUNCA
+❌ Frases vagas ❌ Sin datos ❌ Acciones genéricas ❌ Omitir plataforma ❌ Omitir campañas ❌ Ignorar TC/CAC en ventas ❌ Hacer múltiples queries secuenciales (usar CTEs)`;
+}
+
+// ─── TOOL DEFINITIONS ───────────────────────────────────────────────────────
+const customTools = [
+  {
+    name: 'run_bigquery_query',
+    description:
+      'Execute a SQL query against BigQuery to get campaign performance data. ALWAYS use this tool before answering data questions. Returns rows as JSON.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        sql: {
+          type: 'string',
+          description:
+            'GoogleSQL query. Use backtick-quoted table references: `perfomance-490910.uandes_marketing.table_name`',
+        },
+        purpose: {
+          type: 'string',
+          description: 'Brief description of what this query will answer',
+        },
+      },
+      required: ['sql', 'purpose'],
+    },
+  },
+];
+
+// ─── MAIN HANDLER ───────────────────────────────────────────────────────────
+export default async function handler(req, res) {
+  // CORS
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-API-Key');
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+
+  const startTime = Date.now();
+
+  try {
+    const { messages: userMessages } = req.body;
+    if (!userMessages || !Array.isArray(userMessages) || userMessages.length === 0) {
+      return res.status(400).json({ error: 'messages array required' });
     }
 
-    html, body {
-      height: 100%;
-      background: var(--bg-primary);
-      color: var(--text-primary);
-      font-family: var(--font);
-      font-size: 15px;
-      line-height: 1.6;
-      -webkit-font-smoothing: antialiased;
-    }
+    // Limit history to last 4 messages
+    const recentMessages = userMessages.slice(-4).map((m) => ({
+      role: m.role,
+      content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+    }));
 
-    .app { display: flex; flex-direction: column; height: 100vh; max-width: 820px; margin: 0 auto; }
+    const systemPrompt = buildSystemPrompt();
 
-    /* ─── HEADER ─────────────────────────────────────────── */
-    .header { display: flex; align-items: center; gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
-    .header-logo { width: 36px; height: 36px; background: var(--accent); border-radius: 10px; display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 13px; color: white; flex-shrink: 0; }
-    .header-info h1 { font-size: 16px; font-weight: 600; line-height: 1.2; }
-    .header-status { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); }
-    .status-dot { width: 7px; height: 7px; background: var(--success); border-radius: 50%; flex-shrink: 0; }
-    .header-actions { margin-left: auto; display: flex; gap: 8px; }
-    .btn-icon { width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; background: transparent; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-secondary); cursor: pointer; transition: all 0.15s; }
-    .btn-icon:hover { background: var(--bg-hover); color: var(--text-primary); border-color: var(--border-light); }
+    // Tool-use loop: Round 1 = forced BQ query, Round 2 = text response (no tools)
+    let messages = [...recentMessages];
+    let finalText = '';
 
-    /* ─── MESSAGES AREA ──────────────────────────────────── */
-    .messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 4px; scroll-behavior: smooth; }
-    .messages::-webkit-scrollbar { width: 6px; }
-    .messages::-webkit-scrollbar-track { background: transparent; }
-    .messages::-webkit-scrollbar-thumb { background: var(--border-light); border-radius: 3px; }
-
-    /* ─── MESSAGE BUBBLES ────────────────────────────────── */
-    .message { max-width: 85%; padding: 14px 18px; border-radius: 18px; font-size: 14.5px; line-height: 1.65; animation: fadeIn 0.2s ease; }
-    @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
-    .message-user { align-self: flex-end; background: var(--accent); color: white; border-bottom-right-radius: 6px; }
-    .message-assistant { align-self: flex-start; background: var(--bg-secondary); border: 1px solid var(--border); border-bottom-left-radius: 6px; max-width: 92%; }
-    .message-assistant .msg-content { color: var(--text-primary); }
-
-    /* ─── STATUS / THINKING ──────────────────────────────── */
-    .message-status { align-self: flex-start; display: flex; align-items: center; gap: 10px; padding: 10px 16px; font-size: 13px; color: var(--text-secondary); animation: fadeIn 0.2s ease; }
-    .spinner { width: 16px; height: 16px; border: 2px solid var(--border-light); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    .thinking-dots { display: flex; gap: 4px; padding: 4px 0; }
-    .thinking-dots span { width: 6px; height: 6px; background: var(--text-muted); border-radius: 50%; animation: dotPulse 1.4s ease-in-out infinite; }
-    .thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
-    .thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
-    @keyframes dotPulse { 0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); } 40% { opacity: 1; transform: scale(1); } }
-
-    /* ─── MARKDOWN STYLING ───────────────────────────────── */
-    .msg-content h1, .msg-content h2, .msg-content h3 { margin: 16px 0 8px; font-weight: 600; line-height: 1.3; }
-    .msg-content h2 { font-size: 15px; color: var(--accent); }
-    .msg-content h3 { font-size: 14px; color: var(--text-primary); }
-    .msg-content p { margin: 6px 0; }
-    .msg-content strong { color: var(--accent); font-weight: 600; }
-    .msg-content ul, .msg-content ol { padding-left: 20px; margin: 8px 0; }
-    .msg-content li { margin: 4px 0; }
-    .msg-content code { font-family: var(--mono); font-size: 12.5px; background: var(--bg-tertiary); padding: 2px 6px; border-radius: 4px; color: var(--accent); }
-    .msg-content pre { background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 14px; margin: 10px 0; overflow-x: auto; }
-    .msg-content pre code { background: none; padding: 0; color: var(--text-primary); font-size: 12.5px; }
-
-    /* ─── LINKS ──────────────────────────────────────────── */
-    .msg-content a {
-      color: var(--accent);
-      text-decoration: none;
-      border-bottom: 1px solid rgba(232, 131, 58, 0.3);
-      transition: border-color 0.15s;
-    }
-    .msg-content a:hover {
-      border-bottom-color: var(--accent);
-    }
-
-    /* ─── TABLE STYLING (scrollable) ─────────────────────── */
-    .msg-content .table-wrapper {
-      overflow-x: auto;
-      margin: 12px 0;
-      border: 1px solid var(--border);
-      border-radius: var(--radius-sm);
-      -webkit-overflow-scrolling: touch;
-    }
-    .msg-content .table-wrapper::-webkit-scrollbar { height: 6px; }
-    .msg-content .table-wrapper::-webkit-scrollbar-track { background: var(--bg-tertiary); }
-    .msg-content .table-wrapper::-webkit-scrollbar-thumb { background: var(--border-light); border-radius: 3px; }
-
-    .msg-content table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 13px;
-      min-width: 600px;
-    }
-    .msg-content th {
-      background: var(--accent-dim);
-      color: var(--accent);
-      font-weight: 600;
-      text-align: left;
-      padding: 10px 14px;
-      border-bottom: 2px solid var(--accent);
-      white-space: nowrap;
-      position: sticky;
-      top: 0;
-    }
-    .msg-content td {
-      padding: 9px 14px;
-      border-bottom: 1px solid var(--border);
-      color: var(--text-primary);
-      white-space: nowrap;
-    }
-    .msg-content tr:last-child td { border-bottom: none; }
-    .msg-content tr:hover td { background: rgba(232, 131, 58, 0.05); }
-
-    /* ─── MESSAGE FOOTER ─────────────────────────────────── */
-    .msg-footer { display: flex; align-items: center; justify-content: space-between; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); }
-    .msg-time { font-size: 11px; color: var(--text-muted); }
-    .btn-copy { display: flex; align-items: center; gap: 5px; padding: 4px 10px; font-size: 11px; color: var(--text-secondary); background: transparent; border: 1px solid var(--border); border-radius: 6px; cursor: pointer; transition: all 0.15s; font-family: var(--font); }
-    .btn-copy:hover { background: var(--bg-hover); color: var(--text-primary); }
-    .btn-copy.copied { color: var(--success); border-color: var(--success); }
-
-    /* ─── WELCOME SCREEN ─────────────────────────────────── */
-    .welcome { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px 20px; text-align: center; }
-    .welcome-icon { width: 56px; height: 56px; background: var(--accent-dim); border: 1px solid rgba(232, 131, 58, 0.3); border-radius: 16px; display: flex; align-items: center; justify-content: center; font-size: 26px; margin-bottom: 20px; }
-    .welcome h2 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
-    .welcome p { color: var(--text-secondary); font-size: 14px; max-width: 400px; margin-bottom: 28px; }
-
-    /* ─── QUICK ACTIONS ──────────────────────────────────── */
-    .quick-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; width: 100%; max-width: 520px; }
-    .quick-btn { display: flex; align-items: center; gap: 8px; padding: 12px 14px; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text-primary); font-size: 12.5px; font-family: var(--font); cursor: pointer; transition: all 0.15s; text-align: left; line-height: 1.3; }
-    .quick-btn:hover { background: var(--bg-hover); border-color: var(--accent); transform: translateY(-1px); }
-    .quick-btn .icon { font-size: 16px; flex-shrink: 0; }
-
-    /* ─── INPUT AREA ─────────────────────────────────────── */
-    .input-area { padding: 12px 20px 16px; border-top: 1px solid var(--border); flex-shrink: 0; }
-    .input-wrapper { display: flex; align-items: flex-end; gap: 10px; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 16px; padding: 6px 6px 6px 18px; transition: border-color 0.15s; }
-    .input-wrapper:focus-within { border-color: var(--accent); }
-    .input-wrapper textarea { flex: 1; background: none; border: none; color: var(--text-primary); font-family: var(--font); font-size: 14.5px; resize: none; outline: none; padding: 8px 0; max-height: 120px; line-height: 1.5; }
-    .input-wrapper textarea::placeholder { color: var(--text-muted); }
-    .btn-send { width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; background: var(--accent); border: none; border-radius: 12px; color: white; cursor: pointer; transition: all 0.15s; flex-shrink: 0; }
-    .btn-send:hover { background: var(--accent-hover); transform: scale(1.05); }
-    .btn-send:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
-    .btn-send svg { width: 18px; height: 18px; }
-    .footer-text { text-align: center; padding: 8px; font-size: 11px; color: var(--text-muted); }
-
-    /* ─── RESPONSIVE ─────────────────────────────────────── */
-    @media (max-width: 600px) {
-      .quick-actions { grid-template-columns: repeat(2, 1fr); }
-      .message { max-width: 92%; }
-      .message-assistant { max-width: 96%; }
-      .header { padding: 12px 16px; }
-      .messages { padding: 16px; }
-      .input-area { padding: 10px 16px 14px; }
-    }
-  </style>
-</head>
-<body>
-  <div class="app">
-    <div class="header">
-      <div class="header-logo">5m</div>
-      <div class="header-info">
-        <h1>UAndes Analytics</h1>
-        <div class="header-status"><span class="status-dot"></span> Conectado a BigQuery</div>
-      </div>
-      <div class="header-actions">
-        <button class="btn-icon" onclick="clearChat()" title="Nueva conversación">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
-        </button>
-      </div>
-    </div>
-
-    <div class="messages" id="messages">
-      <div class="welcome" id="welcome">
-        <div class="welcome-icon">📊</div>
-        <h2>UAndes Analytics</h2>
-        <p>Consulta tus datos de campañas Meta y Google Ads en lenguaje natural. Conectado en tiempo real a BigQuery.</p>
-        <div class="quick-actions">
-          <button class="quick-btn" onclick="sendQuick('Dame un resumen del gasto y rendimiento de ayer en ambas plataformas')"><span class="icon">📊</span> Resumen de ayer</button>
-          <button class="quick-btn" onclick="sendQuick('Muéstrame las campañas con gasto pero sin ningún MQL en los últimos 7 días')"><span class="icon">🔴</span> Gasto sin MQL</button>
-          <button class="quick-btn" onclick="sendQuick('Muéstrame la tendencia de CPL por día en los últimos 14 días, separado por plataforma')"><span class="icon">📈</span> Tendencia CPL</button>
-          <button class="quick-btn" onclick="sendQuick('Muéstrame los search terms de Google que más gastan sin generar conversiones')"><span class="icon">🔍</span> Search terms</button>
-          <button class="quick-btn" onclick="sendQuick('Ranking de campañas por inversión total en los últimos 7 días')"><span class="icon">💰</span> Top inversión</button>
-          <button class="quick-btn" onclick="sendQuick('Qué campañas tienen el mejor CPL y más volumen para escalar?')"><span class="icon">🎯</span> Mejores para escalar</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="input-area">
-      <div class="input-wrapper">
-        <textarea id="input" placeholder="Pregunta sobre tus campañas..." rows="1" onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
-        <button class="btn-send" id="sendBtn" onclick="sendMessage()">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-        </button>
-      </div>
-      <div class="footer-text">Los datos provienen de BigQuery en tiempo real · 5minutos.io × UAndes Online</div>
-    </div>
-  </div>
-
-  <script>
-    var conversationHistory = [];
-    var isStreaming = false;
-
-    // ─── MARKDOWN SETUP ────────────────────────────────────
-    marked.setOptions({
-      breaks: true,
-      gfm: true,
-      headerIds: false,
-      mangle: false,
-    });
-
-    // Post-process HTML: wrap tables in scroll container + open links in new tab
-    function postProcessHTML(html) {
-      // Wrap tables in scrollable div
-      html = html.replace(/<table>/g, '<div class="table-wrapper"><table>');
-      html = html.replace(/<\/table>/g, '</table></div>');
-      // Open all links in new tab
-      html = html.replace(/<a href="/g, '<a target="_blank" rel="noopener noreferrer" href="');
-      return html;
-    }
-
-    // Override marked.parse to include post-processing
-    var originalParse = marked.parse.bind(marked);
-    marked.parse = function(text) {
-      return postProcessHTML(originalParse(text));
+    // ─── ROUND 1: Force BigQuery query ───────────────────────
+    console.log(`[Round 1] Starting. Elapsed: ${Date.now() - startTime}ms`);
+    
+    const round1Body = {
+      model: CLAUDE_MODEL,
+      max_tokens: 1024,
+      system: systemPrompt,
+      messages,
+      tools: customTools,
+      tool_choice: { type: 'tool', name: 'run_bigquery_query' },
     };
 
-    // ─── DOM HELPERS ────────────────────────────────────────
-    var messagesEl = document.getElementById("messages");
-    var inputEl = document.getElementById("input");
-    var sendBtn = document.getElementById("sendBtn");
-    var welcomeEl = document.getElementById("welcome");
-
-    function scrollToBottom() { messagesEl.scrollTop = messagesEl.scrollHeight; }
-    function autoResize(el) { el.style.height = "auto"; el.style.height = Math.min(el.scrollHeight, 120) + "px"; }
-    function handleKey(e) { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); } }
-    function formatTime() { return new Date().toLocaleTimeString("es-CL", { hour: "2-digit", minute: "2-digit" }); }
-
-    function addUserMessage(text) {
-      if (welcomeEl) welcomeEl.style.display = "none";
-      var div = document.createElement("div");
-      div.className = "message message-user";
-      div.textContent = text;
-      messagesEl.appendChild(div);
-      scrollToBottom();
+    let round1Response;
+    try {
+      round1Response = await callClaude(round1Body);
+    } catch (err) {
+      if (err.status === 529) {
+        await sleep(3000);
+        round1Response = await callClaude(round1Body);
+      } else {
+        throw err;
+      }
     }
 
-    function createAssistantMessage() {
-      var div = document.createElement("div");
-      div.className = "message message-assistant";
-      var content = document.createElement("div");
-      content.className = "msg-content";
-      div.appendChild(content);
-      messagesEl.appendChild(div);
-      scrollToBottom();
-      return { container: div, content: content, rawText: "" };
-    }
-
-    function addStatusMessage(text) {
-      var prev = messagesEl.querySelector(".message-status");
-      if (prev) prev.remove();
-      var div = document.createElement("div");
-      div.className = "message-status";
-      div.innerHTML = '<div class="spinner"></div>' + escapeHtml(text);
-      messagesEl.appendChild(div);
-      scrollToBottom();
-      return div;
-    }
-
-    function removeStatus() { var el = messagesEl.querySelector(".message-status"); if (el) el.remove(); }
-
-    function addThinking() {
-      removeStatus();
-      var div = document.createElement("div");
-      div.className = "message-status";
-      div.id = "thinking";
-      div.innerHTML = '<div class="thinking-dots"><span></span><span></span><span></span></div>';
-      messagesEl.appendChild(div);
-      scrollToBottom();
-      return div;
-    }
-
-    function removeThinking() { var el = document.getElementById("thinking"); if (el) el.remove(); }
-
-    function addFooter(container, rawText) {
-      var footer = document.createElement("div");
-      footer.className = "msg-footer";
-      var time = document.createElement("span");
-      time.className = "msg-time";
-      time.textContent = formatTime();
-      var copyBtn = document.createElement("button");
-      copyBtn.className = "btn-copy";
-      copyBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg> Copiar';
-      copyBtn.onclick = function() {
-        navigator.clipboard.writeText(rawText).then(function() {
-          copyBtn.classList.add("copied");
-          copyBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg> Copiado';
-          setTimeout(function() {
-            copyBtn.classList.remove("copied");
-            copyBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg> Copiar';
-          }, 2000);
-        });
-      };
-      footer.appendChild(time);
-      footer.appendChild(copyBtn);
-      container.appendChild(footer);
-    }
-
-    function escapeHtml(text) { var d = document.createElement("div"); d.textContent = text; return d.innerHTML; }
-
-    // ─── CLEAR CHAT ─────────────────────────────────────────
-    function clearChat() {
-      conversationHistory = [];
-      messagesEl.innerHTML = "";
-      var welcome = document.createElement("div");
-      welcome.className = "welcome";
-      welcome.id = "welcome";
-      welcome.innerHTML = '<div class="welcome-icon">📊</div><h2>UAndes Analytics</h2><p>Consulta tus datos de campañas Meta y Google Ads en lenguaje natural. Conectado en tiempo real a BigQuery.</p><div class="quick-actions"><button class="quick-btn" onclick="sendQuick(\'Dame un resumen del gasto y rendimiento de ayer en ambas plataformas\')"><span class="icon">📊</span> Resumen de ayer</button><button class="quick-btn" onclick="sendQuick(\'Muéstrame las campañas con gasto pero sin ningún MQL en los últimos 7 días\')"><span class="icon">🔴</span> Gasto sin MQL</button><button class="quick-btn" onclick="sendQuick(\'Muéstrame la tendencia de CPL por día en los últimos 14 días, separado por plataforma\')"><span class="icon">📈</span> Tendencia CPL</button><button class="quick-btn" onclick="sendQuick(\'Muéstrame los search terms de Google que más gastan sin generar conversiones\')"><span class="icon">🔍</span> Search terms</button><button class="quick-btn" onclick="sendQuick(\'Ranking de campañas por inversión total en los últimos 7 días\')"><span class="icon">💰</span> Top inversión</button><button class="quick-btn" onclick="sendQuick(\'Qué campañas tienen el mejor CPL y más volumen para escalar?\')"><span class="icon">🎯</span> Mejores para escalar</button></div>';
-      messagesEl.appendChild(welcome);
-      welcomeEl = document.getElementById("welcome");
-    }
-
-    // ─── SEND MESSAGE ───────────────────────────────────────
-    function sendQuick(text) { inputEl.value = text; sendMessage(); }
-
-    async function sendMessage() {
-      var text = inputEl.value.trim();
-      if (!text || isStreaming) return;
-
-      isStreaming = true;
-      sendBtn.disabled = true;
-      inputEl.value = "";
-      inputEl.style.height = "auto";
-
-      addUserMessage(text);
-      conversationHistory.push({ role: "user", content: text });
-      addThinking();
-
+    const toolUseBlock = round1Response.content.find((b) => b.type === 'tool_use');
+    if (!toolUseBlock) {
+      // Claude didn't use the tool — extract any text
+      finalText = round1Response.content
+        .filter((b) => b.type === 'text')
+        .map((b) => b.text)
+        .join('\n') || 'No se pudo generar la consulta. Intenta de nuevo.';
+    } else {
+      // Execute BQ query
+      let bqResult;
       try {
-        var recentMessages = conversationHistory.slice(-6);
-        var resp = await fetch("/api/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ messages: recentMessages }),
-        });
-
-        if (!resp.ok) {
-          removeThinking();
-          var errData;
-          try { errData = await resp.json(); } catch(e) { errData = { error: "Error " + resp.status }; }
-          var errMsg = createAssistantMessage();
-          errMsg.rawText = "Error: " + (errData.error || "Error desconocido");
-          errMsg.content.innerHTML = '<p style="color:var(--error)">⚠️ ' + escapeHtml(errMsg.rawText) + '</p>';
-          addFooter(errMsg.container, errMsg.rawText);
-          isStreaming = false;
-          sendBtn.disabled = false;
-          return;
-        }
-
-        var contentType = resp.headers.get("content-type") || "";
-
-        if (contentType.includes("text/event-stream")) {
-          removeThinking();
-          var assistantMsg = null;
-          var fullText = "";
-          var reader = resp.body.getReader();
-          var decoder = new TextDecoder();
-          var buffer = "";
-
-          while (true) {
-            var readResult = await reader.read();
-            if (readResult.done) break;
-            buffer += decoder.decode(readResult.value, { stream: true });
-            var lines = buffer.split("\n");
-            buffer = lines.pop() || "";
-
-            for (var li = 0; li < lines.length; li++) {
-              var line = lines[li].trim();
-              if (line.startsWith("event: ")) { var eventType = line.slice(7); continue; }
-              if (line.startsWith("data: ")) {
-                var jsonStr = line.slice(6);
-                try { var eventData = JSON.parse(jsonStr); } catch(e) { continue; }
-                if (eventType === "text") {
-                  if (!assistantMsg) assistantMsg = createAssistantMessage();
-                  removeStatus();
-                  fullText += eventData.text;
-                  assistantMsg.content.innerHTML = marked.parse(fullText);
-                  scrollToBottom();
-                } else if (eventType === "status") {
-                  if (!assistantMsg) addStatusMessage(eventData.message);
-                } else if (eventType === "error") {
-                  removeStatus();
-                  if (!assistantMsg) assistantMsg = createAssistantMessage();
-                  fullText += "\n\n⚠️ Error: " + eventData.message;
-                  assistantMsg.content.innerHTML = marked.parse(fullText);
-                }
-              }
-            }
-          }
-          if (assistantMsg) {
-            addFooter(assistantMsg.container, fullText);
-            conversationHistory.push({ role: "assistant", content: fullText });
-          }
-
-        } else {
-          removeThinking();
-          var data = await resp.json();
-          var assistantMsg = createAssistantMessage();
-          var fullText = data.response || "Sin respuesta.";
-
-          var rendered = "";
-          var chunkSize = 8;
-          for (var ti = 0; ti < fullText.length; ti += chunkSize) {
-            rendered = fullText.slice(0, ti + chunkSize);
-            assistantMsg.content.innerHTML = marked.parse(rendered);
-            scrollToBottom();
-            await new Promise(function(r) { setTimeout(r, 10); });
-          }
-          assistantMsg.content.innerHTML = marked.parse(fullText);
-          addFooter(assistantMsg.container, fullText);
-          conversationHistory.push({ role: "assistant", content: fullText });
-          scrollToBottom();
-        }
-
+        console.log(`[BQ] ${toolUseBlock.input.purpose || 'query'}`);
+        bqResult = await runBigQuery(toolUseBlock.input.sql);
       } catch (err) {
-        removeThinking();
-        removeStatus();
-        var errMsg = createAssistantMessage();
-        var errText = "Error de conexión: " + err.message;
-        errMsg.content.innerHTML = '<p style="color:var(--error)">⚠️ ' + escapeHtml(errText) + '</p>';
-        addFooter(errMsg.container, errText);
+        console.error(`[BQ Error] ${err.message}`);
+        bqResult = `Error: ${err.message}`;
       }
 
-      isStreaming = false;
-      sendBtn.disabled = false;
-      inputEl.focus();
+      console.log(`[Round 1] BQ done. Elapsed: ${Date.now() - startTime}ms`);
+
+      // ─── ROUND 2: Get text response with data (NO tools) ───
+      messages.push({ role: 'assistant', content: round1Response.content });
+      messages.push({
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: toolUseBlock.id,
+            content: String(bqResult),
+          },
+        ],
+      });
+
+      console.log(`[Round 2] Starting. Elapsed: ${Date.now() - startTime}ms`);
+
+      const round2Body = {
+        model: CLAUDE_MODEL,
+        max_tokens: MAX_TOKENS,
+        system: systemPrompt,
+        messages,
+        // NO tools = Claude MUST respond with text only
+      };
+
+      let round2Response;
+      try {
+        round2Response = await callClaude(round2Body);
+      } catch (err) {
+        if (err.status === 529) {
+          await sleep(3000);
+          round2Response = await callClaude(round2Body);
+        } else {
+          throw err;
+        }
+      }
+
+      const textBlocks = round2Response.content.filter((b) => b.type === 'text');
+      finalText = textBlocks.map((b) => b.text).join('\n');
+
+      console.log(`[Round 2] Done. Text: ${finalText.length} chars. Elapsed: ${Date.now() - startTime}ms`);
     }
 
-    inputEl.focus();
-  </script>
-</body>
-</html>
+    const responseTime = Date.now() - startTime;
+
+    // Fallback if no text was generated
+    if (!finalText || finalText.trim() === '') {
+      console.error(`[Chat] No text generated after ${MAX_TOOL_ROUNDS} rounds. Response time: ${responseTime}ms`);
+      finalText = 'Error: No se pudo generar una respuesta. Por favor intenta de nuevo.';
+    }
+
+    console.log(`[Chat] Response generated in ${responseTime}ms, length: ${finalText.length}`);
+
+    // Return JSON response
+    return res.status(200).json({
+      response: finalText,
+      response_time_ms: responseTime,
+    });
+  } catch (err) {
+    console.error('Chat error:', err);
+    const status = err.status || 500;
+    return res.status(status).json({
+      error: err.message || 'Internal server error',
+      response_time_ms: Date.now() - startTime,
+    });
+  }
+}
+
+// ─── Claude API Call ────────────────────────────────────────────────────────
+async function callClaude(body) {
+  const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': process.env.ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!resp.ok) {
+    const err = new Error(`Claude API error: ${resp.status}`);
+    err.status = resp.status;
+    try {
+      const errBody = await resp.json();
+      err.message = errBody.error?.message || err.message;
+    } catch {}
+    throw err;
+  }
+
+  return resp.json();
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
