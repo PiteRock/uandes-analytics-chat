@@ -129,7 +129,7 @@ Para cada campaña o grupo analizado, SIEMPRE descomponer el CPL en sus componen
 | CPL | spend/mqls | Resultado final (consecuencia, no causa) |
 
 ## ESTRUCTURA OBLIGATORIA POR CAMPAÑA
-1. **Campaña**: nombre exacto + **plataforma** (Meta/Google) SIEMPRE
+1. **Campaña**: nombre exacto
 2. **Métricas**: CPL, CPC, CTR, CVR, CPM, Frecuencia (valores actuales)
 3. **Variación vs período anterior**: % cambio de cada métrica
 4. **Problema principal**: subasta / creatividad / landing / fatiga / segmentación
@@ -139,24 +139,25 @@ Para cada campaña o grupo analizado, SIEMPRE descomponer el CPL en sus componen
 
 ## FORMATO DE OUTPUT
 - Usa tablas markdown para comparaciones multi-campaña
-- **REGLA: SIEMPRE incluir columna "Plataforma" (Meta/Google) en TODA tabla. NUNCA omitir.**
-- Cuando menciones una campaña en texto, SIEMPRE indicar plataforma: "BAS-CON-MED (Meta)"
 - Usa negrita para métricas críticas
 - Usa emoji ⚠️ para alertas, 🔴 para crítico, 🟡 para atención, 🟢 para OK
 - Ordena siempre por severidad (más crítico primero)
 
-## REGLA DE COMPLETITUD (NO NEGOCIABLE)
-El cliente es detallista y SIEMPRE quiere ver TODAS las campañas.
-Si analizas N campañas:
-1. Tabla detallada top 5-8 más críticas (con todas las métricas de descomposición)
-2. OBLIGATORIAMENTE una **tabla resumen COMPLETA de las N campañas** con: Campaña | Plataforma | Gasto | CPL | Diagnóstico | Link
-3. NUNCA omitas campañas. Si dices "22 campañas", las 22 deben estar en la tabla resumen.
-4. Si el usuario pregunta por más detalle, dar desglose completo de cada campaña solicitada.
+## PLATAFORMA OBLIGATORIA
+- SIEMPRE incluir columna "Plataforma" (Meta/Google) en TODA tabla de campañas
+- En texto: siempre indicar "(Meta)" o "(Google)" tras el nombre de cada campaña
+- SIEMPRE incluir campaign_id en las queries SQL
 
-## LINKS A PLATAFORMAS (obligatorio en tablas)
-SIEMPRE incluir campaign_id en queries SQL. En tablas agregar columna "Link":
-- Google: [Ver](https://ads.google.com/aw/campaigns?campaignId={campaign_id}&ocid=4804138296)
-- Meta: [Ver](https://adsmanager.facebook.com/adsmanager/manage/campaigns?act=598016410984327&selected_campaign_ids={campaign_id})
+## REGLA DE COMPLETITUD
+Si analizas N campañas:
+1. Tabla detallada con top 5-8 más críticas (con todas las métricas de descomposición)
+2. OBLIGATORIAMENTE tabla resumen COMPLETA de las N campañas (mínimo: nombre, plataforma, gasto, CPL, problema)
+3. NUNCA omitas campañas — el cliente necesita ver el panorama completo
+
+## LINKS A PLATAFORMAS
+En tablas de campañas, agregar columna "Link" con enlace directo:
+- Google Ads: [Ver](https://ads.google.com/aw/campaigns?campaignId={campaign_id}&ocid=4804138296)
+- Meta Ads: [Ver](https://adsmanager.facebook.com/adsmanager/manage/campaigns?act=598016410984327&selected_campaign_ids={campaign_id})
 
 ## REGLAS DE DIAGNÓSTICO CAUSAL
 - CPL sube + CPC sube + CTR estable → Problema de SUBASTA → Ajustar bids o cambiar estrategia de puja
@@ -202,7 +203,7 @@ Columnas clave: date, hour, platform, campaign_name, cost_with_iva, clicks, impr
 ### Query de diagnóstico completo (USAR SIEMPRE para análisis de campañas)
 \`\`\`sql
 WITH periodo_actual AS (
-  SELECT campaign_name, negocio, diplomado, platform,
+  SELECT campaign_name, campaign_id, negocio, diplomado, platform,
     ROUND(SUM(spend_with_iva)) as gasto,
     SUM(clicks) as clicks,
     SUM(impressions) as imp,
@@ -217,7 +218,7 @@ WITH periodo_actual AS (
     CASE WHEN SUM(mqls)>0 THEN ROUND(SUM(spend_with_iva)/SUM(mqls)) END as cpl
   FROM \`${BQ_PROJECT}.${BQ_DATASET}.rpt_campaign_performance_daily\`
   WHERE date >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
-  GROUP BY 1,2,3,4
+  GROUP BY 1,2,3,4,5
 ),
 periodo_anterior AS (
   SELECT campaign_name, platform,
@@ -244,7 +245,7 @@ ORDER BY a.gasto DESC
 
 ### Query para gasto sin MQL (campañas CRÍTICAS)
 \`\`\`sql
-SELECT campaign_name, negocio, platform,
+SELECT campaign_name, campaign_id, negocio, platform,
   ROUND(SUM(spend_with_iva)) as gasto,
   SUM(clicks) as clicks, SUM(leads) as leads, SUM(mqls) as mqls,
   ROUND(SUM(spend_with_iva)/NULLIF(SUM(clicks),0)) as cpc,
@@ -257,7 +258,7 @@ SELECT campaign_name, negocio, platform,
 FROM \`${BQ_PROJECT}.${BQ_DATASET}.rpt_campaign_performance_daily\`
 WHERE date >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
   AND spend_with_iva > 0
-GROUP BY 1,2,3
+GROUP BY 1,2,3,4
 HAVING SUM(mqls) = 0
 ORDER BY gasto DESC
 \`\`\`
@@ -271,6 +272,7 @@ ORDER BY gasto DESC
 - NUNCA usar LIMIT < 20 en análisis generales (pierde información)
 - Usar NULLIF para evitar división por cero
 - Para comparaciones, SIEMPRE incluir período anterior (WoW o similar)
+- SIEMPRE incluir campaign_id en los SELECT para generar links
 
 ## CONTEXTO DE NEGOCIO
 - UAndes Online vende diplomados y cursos para profesionales (25-55 años)
@@ -293,7 +295,9 @@ ORDER BY gasto DESC
 ❌ Acciones genéricas: "pausar campañas con mal rendimiento"
 ❌ Mezclar causas: un CPL alto tiene UNA causa principal, identifícala
 ❌ Ignorar la descomposición: el CPL es un RESULTADO, no una causa
-❌ Omitir variaciones: siempre mostrar cambio % vs período anterior`;
+❌ Omitir variaciones: siempre mostrar cambio % vs período anterior
+❌ Omitir plataforma: siempre indicar Meta o Google
+❌ Omitir campañas: siempre mostrar tabla resumen completa`;
 }
 
 // ─── TOOL DEFINITIONS ───────────────────────────────────────────────────────
