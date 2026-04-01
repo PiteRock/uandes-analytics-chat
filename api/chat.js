@@ -396,15 +396,22 @@ export default async function handler(req, res) {
 
       const { content, stop_reason } = response;
 
-      // Extract text blocks
+      // Extract text blocks — ACCUMULATE, don't overwrite
       const textBlocks = content.filter((b) => b.type === 'text').map((b) => b.text);
-      finalText = textBlocks.join('\n');
+      if (textBlocks.length > 0) {
+        finalText = textBlocks.join('\n');
+      }
 
       // Check for tool use
       const toolUseBlocks = content.filter((b) => b.type === 'tool_use');
 
-      if (toolUseBlocks.length === 0 || stop_reason === 'end_turn') {
-        // No more tools, we're done
+      if (toolUseBlocks.length === 0) {
+        // No tool calls, we're done
+        break;
+      }
+
+      // If Claude says end_turn but has no text yet, still process tools
+      if (stop_reason === 'end_turn' && finalText) {
         break;
       }
 
@@ -439,6 +446,23 @@ export default async function handler(req, res) {
 
       if (toolResults.length > 0) {
         messages.push({ role: 'user', content: toolResults });
+      }
+    }
+
+    // Fallback: if loop ended without text, force one final call without tool_choice
+    if (!finalText && messages.length > 1) {
+      try {
+        const fallbackResp = await callClaude({
+          model: CLAUDE_MODEL,
+          max_tokens: MAX_TOKENS,
+          system: systemPrompt,
+          messages,
+          tools: tools,
+        });
+        const fb = fallbackResp.content.filter((b) => b.type === 'text').map((b) => b.text);
+        if (fb.length > 0) finalText = fb.join('\n');
+      } catch (e) {
+        console.error('Fallback call failed:', e.message);
       }
     }
 
