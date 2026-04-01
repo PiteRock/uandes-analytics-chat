@@ -9,7 +9,7 @@ export const config = { maxDuration: 120 };
 // ─── CONSTANTS ──────────────────────────────────────────────────────────────
 const BQ_PROJECT = 'perfomance-490910';
 const BQ_DATASET = 'uandes_marketing';
-const MAX_TOOL_ROUNDS = 3;
+const MAX_TOOL_ROUNDS = 5;
 const MAX_BQ_ROWS = 30;
 const MAX_BQ_BYTES = 12000;
 const MAX_WEB_SEARCHES = 3;
